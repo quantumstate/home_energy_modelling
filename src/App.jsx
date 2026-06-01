@@ -1,5 +1,6 @@
 import { useState } from "react";
 import FloorPlanUI from "./FloorPlanUI.jsx";
+import UValueCalculator from "./UValueCalculator.jsx";
 
 const TABS = [
   { id: "floor-plan", label: "Floor plan" },
@@ -84,7 +85,7 @@ export default function App() {
       <main style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {activeTab === "floor-plan" && <FloorPlanUI />}
         {activeTab === "3d-view" && <PlaceholderPage title="3d view" />}
-        {activeTab === "u-value-calculator" && <PlaceholderPage title="u value calculator" />}
+        {activeTab === "u-value-calculator" && <UValueCalculator />}
       </main>
     </div>
   );
