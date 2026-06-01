@@ -192,6 +192,12 @@ export default function ThreeDView() {
   useEffect(() => {
     if (!mountRef.current) return;
 
+    // Clear any existing renderer from StrictMode double-mount
+    const existingCanvas = mountRef.current.querySelector("canvas");
+    if (existingCanvas) {
+      mountRef.current.removeChild(existingCanvas);
+    }
+
     const { rooms: roomsByStorey, ceilings: ceilingHeights } = loadFloorPlanData();
     
     // Check if we have any rooms
@@ -376,8 +382,9 @@ export default function ThreeDView() {
     });
 
     // Animation loop
+    let animationId;
     const animate = () => {
-      requestAnimationFrame(animate);
+      animationId = requestAnimationFrame(animate);
       renderer.render(scene, camera);
     };
     animate();
@@ -387,13 +394,11 @@ export default function ThreeDView() {
     // Cleanup
     return () => {
       window.removeEventListener("resize", handleResize);
-      renderer.domElement.removeEventListener("mousedown", () => {});
-      renderer.domElement.removeEventListener("mousemove", () => {});
-      renderer.domElement.removeEventListener("mouseup", () => {});
-      renderer.domElement.removeEventListener("wheel", () => {});
+      cancelAnimationFrame(animationId);
       if (mountRef.current && renderer.domElement.parentNode === mountRef.current) {
         mountRef.current.removeChild(renderer.domElement);
       }
+      renderer.dispose();
     };
   }, []);
 
