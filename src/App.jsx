@@ -1,5 +1,6 @@
 import { useState } from "react";
 import FloorPlanUI from "./FloorPlanUI.jsx";
+import ThreeDView from "./ThreeDView.jsx";
 import UValueCalculator from "./UValueCalculator.jsx";
 
 const TABS = [
@@ -8,27 +9,7 @@ const TABS = [
   { id: "u-value-calculator", label: "u value calculator" },
 ];
 
-function PlaceholderPage({ title }) {
-  return (
-    <div
-      style={{
-        flex: 1,
-        display: "grid",
-        placeItems: "center",
-        background: "#05090f",
-        color: "#2d5a8a",
-        fontFamily: "monospace",
-        fontSize: 12,
-        letterSpacing: "0.12em",
-        textTransform: "uppercase",
-      }}
-    >
-      {title}
-    </div>
-  );
-}
-
-export default function App() {
+function App() {
   const [activeTab, setActiveTab] = useState("floor-plan");
 
   return (
@@ -84,9 +65,11 @@ export default function App() {
 
       <main style={{ flex: 1, display: "flex", minHeight: 0 }}>
         {activeTab === "floor-plan" && <FloorPlanUI />}
-        {activeTab === "3d-view" && <PlaceholderPage title="3d view" />}
+        {activeTab === "3d-view" && <ThreeDView />}
         {activeTab === "u-value-calculator" && <UValueCalculator />}
       </main>
     </div>
   );
 }
+
+export default App;
