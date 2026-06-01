@@ -1,4 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+
+const STORAGE_KEY = "uvalue_building_elements";
+
+const ELEMENT_TYPES = ["wall", "floor", "roof"];
 
 const DEFAULT_LAYERS = [
   { id: "external-render", name: "External render", thicknessMm: 20, lambda: 0.7 },
@@ -43,19 +47,46 @@ const buttonStyle = {
   fontSize: 11,
 };
 
+const createId = (prefix) => `${prefix}-${crypto.randomUUID()}`;
+
+const cloneLayer = (layer) => ({
+  ...layer,
+  id: createId("layer"),
+});
+
 const blankLayer = () => ({
-  id: `layer-${crypto.randomUUID()}`,
+  id: createId("layer"),
   name: "New layer",
   thicknessMm: 50,
   lambda: 0.04,
 });
 
 const layerFromPreset = (preset) => ({
-  id: `layer-${crypto.randomUUID()}`,
+  id: createId("layer"),
   name: preset.name,
   thicknessMm: preset.thicknessMm,
   lambda: preset.lambda,
 });
+
+const createElement = (type = "wall", index = 1) => ({
+  id: createId("element"),
+  type,
+  name: `${type[0].toUpperCase()}${type.slice(1)} build-up ${index}`,
+  layers: type === "wall" ? DEFAULT_LAYERS.map(cloneLayer) : [blankLayer()],
+});
+
+function readStoredElements() {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (!stored) return null;
+
+    const parsed = JSON.parse(stored);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 function layerRValue(layer) {
   const thickness = Number(layer.thicknessMm);
@@ -74,9 +105,15 @@ function formatNumber(value, digits = 3) {
 }
 
 export default function UValueCalculator() {
-  const [layers, setLayers] = useState(DEFAULT_LAYERS);
+  const initialElements = useMemo(() => readStoredElements() || [createElement("wall", 1)], []);
+  const [elements, setElements] = useState(initialElements);
+  const [activeElementId, setActiveElementId] = useState(initialElements[0].id);
+  const [newElementType, setNewElementType] = useState("wall");
   const [dropIndex, setDropIndex] = useState(null);
   const [draggedPresetId, setDraggedPresetId] = useState(null);
+
+  const activeElement = elements.find((element) => element.id === activeElementId) || elements[0];
+  const layers = activeElement?.layers || [];
 
   const totals = useMemo(() => {
     const totalR = layers.reduce((sum, layer) => sum + layerRValue(layer), 0);
@@ -86,22 +123,47 @@ export default function UValueCalculator() {
     };
   }, [layers]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(elements));
+    } catch {
+      // Local storage is best effort; the calculator still works without it.
+    }
+  }, [elements]);
+
+  const updateActiveElement = (updater) => {
+    setElements((current) =>
+      current.map((element) => (element.id === activeElement.id ? updater(element) : element)),
+    );
+  };
+
+  const updateElementField = (key, value) => {
+    updateActiveElement((element) => ({ ...element, [key]: value }));
+  };
+
+  const updateLayers = (updater) => {
+    updateActiveElement((element) => ({
+      ...element,
+      layers: typeof updater === "function" ? updater(element.layers) : updater,
+    }));
+  };
+
   const updateLayer = (id, key, value) => {
-    setLayers((current) =>
+    updateLayers((current) =>
       current.map((layer) => (layer.id === id ? { ...layer, [key]: value } : layer)),
     );
   };
 
   const addLayer = () => {
-    setLayers((current) => [...current, blankLayer()]);
+    updateLayers((current) => [...current, blankLayer()]);
   };
 
   const removeLayer = (id) => {
-    setLayers((current) => current.filter((layer) => layer.id !== id));
+    updateLayers((current) => current.filter((layer) => layer.id !== id));
   };
 
   const moveLayer = (index, direction) => {
-    setLayers((current) => {
+    updateLayers((current) => {
       const nextIndex = index + direction;
       if (nextIndex < 0 || nextIndex >= current.length) return current;
 
@@ -111,11 +173,28 @@ export default function UValueCalculator() {
     });
   };
 
+  const addElement = () => {
+    const sameTypeCount = elements.filter((element) => element.type === newElementType).length + 1;
+    const element = createElement(newElementType, sameTypeCount);
+    setElements((current) => [...current, element]);
+    setActiveElementId(element.id);
+  };
+
+  const removeActiveElement = () => {
+    if (elements.length === 1) return;
+
+    setElements((current) => {
+      const next = current.filter((element) => element.id !== activeElement.id);
+      setActiveElementId(next[0].id);
+      return next;
+    });
+  };
+
   const insertPreset = (presetId, index) => {
     const preset = PRESETS.find((item) => item.id === presetId);
     if (!preset) return;
 
-    setLayers((current) => {
+    updateLayers((current) => {
       const next = [...current];
       next.splice(index, 0, layerFromPreset(preset));
       return next;
@@ -188,16 +267,8 @@ export default function UValueCalculator() {
         setDropIndex(null);
       }}
     >
-      <div style={{ maxWidth: 1320, margin: "0 auto" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            marginBottom: 16,
-          }}
-        >
+      <div style={{ maxWidth: 1420, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
           <div>
             <h1
               style={{
@@ -213,27 +284,131 @@ export default function UValueCalculator() {
               U value calculator
             </h1>
             <div style={{ color: "#2d5a8a", fontSize: 10, letterSpacing: "0.09em", marginTop: 5 }}>
-              LAYERS RUN OUTSIDE TO INSIDE
+              BUILDING ELEMENTS WITH OUTSIDE-TO-INSIDE LAYER BUILD-UPS
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={addLayer}
-            style={{
-              ...buttonStyle,
-              height: 34,
-              padding: "0 12px",
-              color: "#7dd3fc",
-              borderColor: "#2563eb",
-            }}
-          >
-            ADD LAYER
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <select
+              data-testid="new-element-type"
+              value={newElementType}
+              onChange={(event) => setNewElementType(event.target.value)}
+              style={{ ...fieldStyle, width: 126, height: 34, padding: "0 8px", textTransform: "uppercase" }}
+            >
+              {ELEMENT_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+            <button
+              data-testid="add-element"
+              type="button"
+              onClick={addElement}
+              style={{ ...buttonStyle, height: 34, padding: "0 12px", color: "#7dd3fc", borderColor: "#2563eb" }}
+            >
+              ADD ELEMENT
+            </button>
+          </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(720px, 1fr) 290px", gap: 16, alignItems: "start" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "230px minmax(720px, 1fr) 290px", gap: 16, alignItems: "start" }}>
+          <aside style={{ background: "#070d1a", border: "1px solid #132040", borderRadius: 6, padding: 12 }}>
+            <div style={{ color: "#7dd3fc", fontSize: 11, fontWeight: 700, letterSpacing: "0.14em", marginBottom: 10 }}>
+              ELEMENTS
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {elements.map((element) => {
+                const isActive = element.id === activeElement.id;
+                const totalR = element.layers.reduce((sum, layer) => sum + layerRValue(layer), 0);
+                const uValue = totalR > 0 ? 1 / totalR : 0;
+
+                return (
+                  <button
+                    key={element.id}
+                    type="button"
+                    onClick={() => setActiveElementId(element.id)}
+                    style={{
+                      background: isActive ? "#1e4a7a" : "#0a1628",
+                      border: `1px solid ${isActive ? "#2563eb" : "#132040"}`,
+                      borderRadius: 5,
+                      color: isActive ? "#7dd3fc" : "#c8d8f0",
+                      cursor: "pointer",
+                      fontFamily: "monospace",
+                      padding: 9,
+                      textAlign: "left",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700 }}>{element.name}</span>
+                      <span style={{ color: isActive ? "#bae6fd" : "#2d5a8a", fontSize: 9, textTransform: "uppercase" }}>
+                        {element.type}
+                      </span>
+                    </div>
+                    <div style={{ color: isActive ? "#bae6fd" : "#2d5a8a", fontSize: 9 }}>
+                      U {uValue > 0 ? formatNumber(uValue) : "-"} W/m2K
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+
           <div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(220px, 1fr) 130px 92px",
+                gap: 8,
+                background: "#070d1a",
+                border: "1px solid #132040",
+                borderRadius: 6,
+                padding: 10,
+                marginBottom: 12,
+              }}
+            >
+              <label>
+                <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.12em", marginBottom: 5 }}>BUILD-UP NAME</div>
+                <input
+                  data-testid="build-up-name"
+                  type="text"
+                  value={activeElement.name}
+                  onChange={(event) => updateElementField("name", event.target.value)}
+                  style={fieldStyle}
+                />
+              </label>
+              <label>
+                <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.12em", marginBottom: 5 }}>TYPE</div>
+                <select
+                  data-testid="active-element-type"
+                  value={activeElement.type}
+                  onChange={(event) => updateElementField("type", event.target.value)}
+                  style={{ ...fieldStyle, height: 35, padding: "0 8px", textTransform: "uppercase" }}
+                >
+                  {ELEMENT_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {type}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={removeActiveElement}
+                disabled={elements.length === 1}
+                style={{
+                  ...buttonStyle,
+                  alignSelf: "end",
+                  height: 35,
+                  color: "#f87171",
+                  borderColor: "#7f1d1d",
+                  opacity: elements.length === 1 ? 0.35 : 1,
+                }}
+              >
+                DELETE
+              </button>
+            </div>
+
             <div
               style={{
                 display: "grid",
@@ -250,7 +425,7 @@ export default function UValueCalculator() {
               }}
             >
               <div>Side</div>
-              <div>Name</div>
+              <div>Layer</div>
               <div>Thickness</div>
               <div>Lambda</div>
               <div>R value</div>
@@ -318,13 +493,7 @@ export default function UValueCalculator() {
                         <span style={{ color: "#2d5a8a", fontSize: 10 }}>W/mK</span>
                       </label>
 
-                      <div
-                        style={{
-                          color: rValue > 0 ? "#7dd3fc" : "#7f1d1d",
-                          fontSize: 13,
-                          fontWeight: 700,
-                        }}
-                      >
+                      <div style={{ color: rValue > 0 ? "#7dd3fc" : "#7f1d1d", fontSize: 13, fontWeight: 700 }}>
                         {formatNumber(rValue)}
                       </div>
 
@@ -362,18 +531,41 @@ export default function UValueCalculator() {
                 );
               })}
             </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 10 }}>
+              <button
+                type="button"
+                onClick={addLayer}
+                style={{ ...buttonStyle, height: 34, padding: "0 12px", color: "#7dd3fc", borderColor: "#2563eb" }}
+              >
+                ADD LAYER
+              </button>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(180px, 1fr))", gap: 10, marginTop: 16 }}>
+              <div style={{ background: "#070d1a", border: "1px solid #132040", borderRadius: 6, padding: 14 }}>
+                <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.14em", marginBottom: 6 }}>
+                  TOTAL R VALUE
+                </div>
+                <div style={{ color: "#7dd3fc", fontSize: 24, fontWeight: 700 }}>
+                  {formatNumber(totals.totalR)}
+                  <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>m2K/W</span>
+                </div>
+              </div>
+
+              <div style={{ background: "#070d1a", border: "1px solid #132040", borderRadius: 6, padding: 14 }}>
+                <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.14em", marginBottom: 6 }}>
+                  U VALUE
+                </div>
+                <div style={{ color: "#34d399", fontSize: 24, fontWeight: 700 }}>
+                  {totals.uValue > 0 ? formatNumber(totals.uValue) : "-"}
+                  <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>W/m2K</span>
+                </div>
+              </div>
+            </div>
           </div>
 
-          <aside
-            style={{
-              background: "#070d1a",
-              border: "1px solid #132040",
-              borderRadius: 6,
-              padding: 12,
-              position: "sticky",
-              top: 0,
-            }}
-          >
+          <aside style={{ background: "#070d1a", border: "1px solid #132040", borderRadius: 6, padding: 12, position: "sticky", top: 0 }}>
             <div style={{ color: "#7dd3fc", fontSize: 11, fontWeight: 700, letterSpacing: "0.14em", marginBottom: 4 }}>
               PRESETS
             </div>
@@ -413,36 +605,6 @@ export default function UValueCalculator() {
               })}
             </div>
           </aside>
-        </div>
-
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(2, minmax(180px, 1fr))",
-            gap: 10,
-            marginTop: 16,
-            maxWidth: "calc(100% - 306px)",
-          }}
-        >
-          <div style={{ background: "#070d1a", border: "1px solid #132040", borderRadius: 6, padding: 14 }}>
-            <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.14em", marginBottom: 6 }}>
-              TOTAL R VALUE
-            </div>
-            <div style={{ color: "#7dd3fc", fontSize: 24, fontWeight: 700 }}>
-              {formatNumber(totals.totalR)}
-              <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>m2K/W</span>
-            </div>
-          </div>
-
-          <div style={{ background: "#070d1a", border: "1px solid #132040", borderRadius: 6, padding: 14 }}>
-            <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.14em", marginBottom: 6 }}>
-              U VALUE
-            </div>
-            <div style={{ color: "#34d399", fontSize: 24, fontWeight: 700 }}>
-              {totals.uValue > 0 ? formatNumber(totals.uValue) : "-"}
-              <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>W/m2K</span>
-            </div>
-          </div>
         </div>
       </div>
     </section>
