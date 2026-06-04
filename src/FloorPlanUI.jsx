@@ -1,4 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { buildingModelFromState } from "./geometryProcessor.js";
+import { STOREY_LABELS as STOREY_LABELS_CONST, DEFAULT_U_VALUES } from "./constants.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PPM  = 60;
@@ -18,9 +20,6 @@ const PALETTE = [
   { bg: "#c084fc18", line: "#c084fc", label: "#e9d5ff" },
   { bg: "#fb923c18", line: "#fb923c", label: "#fed7aa" },
 ];
-
-// Sensible UK Part-L defaults, W/(m²·K)
-const DEFAULT_U_VALUES = { wall: 0.30, floor: 0.25, roof: 0.20, window: 1.60, door: 1.80 };
 
 // ─── Geometry ─────────────────────────────────────────────────────────────────
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -185,7 +184,7 @@ export default function FloorPlanUI() {
   useEffect(() => { panRef.current  = pan;  }, [pan]);
 
   // ── Storeys ──
-  const STOREY_LABELS = ["Ground", "First", "Second"];
+  const STOREY_LABELS = STOREY_LABELS_CONST;
   const [activeStorey, setActiveStorey] = useState(0);
 
   const [roomsByStorey, setRoomsByStorey] = useState(() => {
@@ -218,6 +217,14 @@ export default function FloorPlanUI() {
   useEffect(() => { try { localStorage.setItem("floorplan_rooms", JSON.stringify(roomsByStorey)); setSavedAt(new Date()); } catch {} }, [roomsByStorey]);
   useEffect(() => { try { localStorage.setItem("floorplan_ceilings", JSON.stringify(ceilingHeights)); } catch {} }, [ceilingHeights]);
   useEffect(() => { try { localStorage.setItem("floorplan_uvalues", JSON.stringify(globalU)); } catch {} }, [globalU]);
+
+  // Persist BuildingModel so other views (3D, energy model) can consume it.
+  useEffect(() => {
+    try {
+      const model = buildingModelFromState({ roomsByStorey, ceilingHeights, globalU });
+      localStorage.setItem("building_model", JSON.stringify(model));
+    } catch {}
+  }, [roomsByStorey, ceilingHeights, globalU]);
 
   const clearStorage = () => {
     if (!window.confirm("Clear all floors and start over?")) return;

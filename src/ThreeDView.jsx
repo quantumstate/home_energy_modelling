@@ -1,14 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import { buildingModelFromState, processBuilding } from "./geometryProcessor.js";
 
-// Get room data from localStorage
-const loadFloorPlanData = () => {
+// Load and process the BuildingModel written by FloorPlanUI.
+const loadProcessedBuilding = () => {
   try {
-    const rooms = JSON.parse(localStorage.getItem("floorplan_rooms")) || { 0: [], 1: [], 2: [] };
-    const ceilings = JSON.parse(localStorage.getItem("floorplan_ceilings")) || { 0: 3.0, 1: 2.7, 2: 2.5 };
-    return { rooms, ceilings };
+    const raw = localStorage.getItem("building_model");
+    if (raw) {
+      const model = JSON.parse(raw);
+      return processBuilding(model);
+    }
+  } catch {}
+
+  // Fallback: reconstruct from raw editor state if building_model not yet written.
+  try {
+    const roomsByStorey = JSON.parse(localStorage.getItem("floorplan_rooms")) || { 0: [], 1: [], 2: [] };
+    const ceilingHeights = JSON.parse(localStorage.getItem("floorplan_ceilings")) || { 0: 3.0, 1: 2.7, 2: 2.5 };
+    const globalU = JSON.parse(localStorage.getItem("floorplan_uvalues")) || null;
+    const model = buildingModelFromState({ roomsByStorey, ceilingHeights, globalU });
+    return processBuilding(model);
   } catch {
-    return { rooms: { 0: [], 1: [], 2: [] }, ceilings: { 0: 3.0, 1: 2.7, 2: 2.5 } };
+    return null;
   }
 };
 
@@ -198,12 +210,9 @@ export default function ThreeDView() {
       mountRef.current.removeChild(existingCanvas);
     }
 
-    const { rooms: roomsByStorey, ceilings: ceilingHeights } = loadFloorPlanData();
-    
-    // Check if we have any rooms
-    const hasRooms = Object.values(roomsByStorey).some(storeyRooms => storeyRooms.length > 0);
-    
-    if (!hasRooms) {
+    const processedBuilding = loadProcessedBuilding();
+
+    if (!processedBuilding || processedBuilding.rooms.length === 0) {
       setInfo("No rooms in floor plan. Draw rooms in the Floor Plan tab first.");
       setLoading(false);
       return;
@@ -255,87 +264,69 @@ export default function ThreeDView() {
     ground.receiveShadow = true;
     scene.add(ground);
 
-    // Color palette for rooms
     const PALETTE = [
-      0x60a5fa,
-      0x34d399,
-      0xfbbf24,
-      0xf47272,
-      0xc084fc,
-      0xfb923c,
+      0x60a5fa, 0x34d399, 0xfbbf24, 0xf47272, 0xc084fc, 0xfb923c,
     ];
 
-    let zOffset = 0;
-    let roomIndex = 0;
+    // Add rooms using ProcessedBuilding data
+    processedBuilding.rooms.forEach((processedRoom, roomIndex) => {
+      const storey = processedBuilding.source.storeys[processedRoom.storeyIndex];
+      const zOffset = storey.floorElevation;
+      const ceilingHeight = storey.ceilingHeight;
 
-    // Add rooms for each storey
-    for (const [storeyIdx, storeyRooms] of Object.entries(roomsByStorey)) {
-      const ceilingHeight = ceilingHeights[storeyIdx] || 3.0;
+      // Retrieve original room points for floor/ceiling shapes
+      const sourceRoom = storey.rooms.find(r => r.id === processedRoom.sourceId);
+      if (!sourceRoom || sourceRoom.points.length < 3) return;
+      const points = sourceRoom.points;
 
-      for (const room of storeyRooms) {
-        if (!room.points || room.points.length < 3) continue;
-
-        const color = PALETTE[roomIndex % PALETTE.length];
-        const material = new THREE.MeshPhongMaterial({
-          color: color,
-          side: THREE.DoubleSide,
-          flatShading: false,
-        });
-
-        // Create walls
-        const points = room.points;
-        for (let i = 0; i < points.length; i++) {
-          const ptA = points[i];
-          const ptB = points[(i + 1) % points.length];
-          const openings = (room.openings || []).filter((o) => o.wallIdx === i);
-
-          const wallGroup = createWallWithOpenings(ptA, ptB, ceilingHeight, openings);
-          if (wallGroup) {
-            wallGroup.position.z = zOffset;
-            wallGroup.castShadow = true;
-            wallGroup.receiveShadow = true;
-            scene.add(wallGroup);
-          }
+      // Walls — use ProcessedWall geometry so adjacency and openings are resolved
+      for (const wall of processedRoom.walls) {
+        const wallLen = wall.length;
+        const wallDx = wallLen > 0 ? (wall.endPoint.x - wall.startPoint.x) / wallLen : 0;
+        const wallDy = wallLen > 0 ? (wall.endPoint.y - wall.startPoint.y) / wallLen : 0;
+        const openings = wall.openings.map(o => ({
+          type: o.type,
+          // Project worldPosition back to offset along wall
+          offset: (o.worldPosition.x - wall.startPoint.x) * wallDx
+                + (o.worldPosition.y - wall.startPoint.y) * wallDy,
+          width: o.width,
+          height: o.height,
+          sillHeight: o.sillHeight,
+        }));
+        const wallGroup = createWallWithOpenings(wall.startPoint, wall.endPoint, ceilingHeight, openings);
+        if (wallGroup) {
+          wallGroup.position.z = zOffset;
+          wallGroup.castShadow = true;
+          wallGroup.receiveShadow = true;
+          scene.add(wallGroup);
         }
-
-        // Create floor
-        const floorShape = new THREE.Shape();
-        floorShape.moveTo(points[0].x, points[0].y);
-        for (let i = 1; i < points.length; i++) {
-          floorShape.lineTo(points[i].x, points[i].y);
-        }
-        floorShape.lineTo(points[0].x, points[0].y);
-
-        const floorGeom = new THREE.ShapeGeometry(floorShape);
-        const floorMaterial = new THREE.MeshPhongMaterial({
-          color: 0x333333,
-          side: THREE.DoubleSide,
-        });
-        const floorMesh = new THREE.Mesh(floorGeom, floorMaterial);
-        floorMesh.position.z = zOffset;
-        floorMesh.rotation.x = 0;
-        floorMesh.castShadow = true;
-        floorMesh.receiveShadow = true;
-        scene.add(floorMesh);
-
-        // Create ceiling
-        const ceilingGeom = new THREE.ShapeGeometry(floorShape);
-        const ceilingMaterial = new THREE.MeshPhongMaterial({
-          color: 0x444444,
-          side: THREE.DoubleSide,
-        });
-        const ceilingMesh = new THREE.Mesh(ceilingGeom, ceilingMaterial);
-        ceilingMesh.position.z = zOffset + ceilingHeight;
-        ceilingMesh.rotation.x = 0;
-        ceilingMesh.castShadow = true;
-        ceilingMesh.receiveShadow = true;
-        scene.add(ceilingMesh);
-
-        roomIndex++;
       }
 
-      zOffset += ceilingHeight + 0.3; // Add space between storeys
-    }
+      // Floor
+      const floorShape = new THREE.Shape();
+      floorShape.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) floorShape.lineTo(points[i].x, points[i].y);
+      floorShape.lineTo(points[0].x, points[0].y);
+
+      const floorMesh = new THREE.Mesh(
+        new THREE.ShapeGeometry(floorShape),
+        new THREE.MeshPhongMaterial({ color: 0x333333, side: THREE.DoubleSide }),
+      );
+      floorMesh.position.z = zOffset;
+      floorMesh.castShadow = true;
+      floorMesh.receiveShadow = true;
+      scene.add(floorMesh);
+
+      // Ceiling
+      const ceilingMesh = new THREE.Mesh(
+        new THREE.ShapeGeometry(floorShape),
+        new THREE.MeshPhongMaterial({ color: 0x444444, side: THREE.DoubleSide }),
+      );
+      ceilingMesh.position.z = zOffset + ceilingHeight;
+      ceilingMesh.castShadow = true;
+      ceilingMesh.receiveShadow = true;
+      scene.add(ceilingMesh);
+    });
 
     // Handle window resize
     const handleResize = () => {
