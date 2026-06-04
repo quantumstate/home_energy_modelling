@@ -248,7 +248,7 @@ export default function ThreeDView() {
 
     // Add ground plane
     const groundGeom = new THREE.PlaneGeometry(200, 200);
-    const groundMat = new THREE.MeshPhongMaterial({ color: 0x1a1a1a });
+    const groundMat = new THREE.MeshPhongMaterial({ color: 0x336a28 });
     const ground = new THREE.Mesh(groundGeom, groundMat);
     ground.rotation.x = -Math.PI / 2;
     ground.position.z = 0;
