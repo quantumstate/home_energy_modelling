@@ -314,7 +314,11 @@ export function processBuilding(model) {
 
       // ── Roof ───────────────────────────────────────────────────────────────
       const uRoof    = (room.roofU !== null && room.roofU !== undefined) ? room.roofU : defU.roof;
-      const isTopStorey = si === model.storeys.length - 1;
+      // A storey is the top (exposed roof) when no higher storey has any rooms.
+      // We cannot use `si === model.storeys.length - 1` because buildingModelFromState
+      // always generates a fixed number of storeys (one per STOREY_LABELS entry),
+      // leaving upper storeys empty when the building only uses lower floors.
+      const isTopStorey = model.storeys.slice(si + 1).every(s => s.rooms.length === 0);
       const roofAdj  = isTopStorey ? "external" : "internal-heated";
       const roofHLC  = roofAdj === "external" ? uRoof * roomArea : 0;
       const roof = {

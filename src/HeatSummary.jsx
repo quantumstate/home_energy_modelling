@@ -1,5 +1,7 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { buildingModelFromState, processBuilding } from "./geometryProcessor.js";
+import { parseEPW, computeHDD, computeMonthlyHDD } from "./epwParser.js";
+import kewEPWRaw from "./assets/GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw?raw";
 
 // ─── Load processed building from localStorage ────────────────────────────────
 function loadProcessedBuilding() {
@@ -16,7 +18,7 @@ function loadProcessedBuilding() {
   return null;
 }
 
-// ─── Small display components ─────────────────────────────────────────────────
+// ─── Primitive UI components ──────────────────────────────────────────────────
 function SectionHeader({ label }) {
   return (
     <div style={{
@@ -28,14 +30,14 @@ function SectionHeader({ label }) {
   );
 }
 
-function MetricRow({ label, value, unit, highlight }) {
+function MetricRow({ label, value, unit }) {
   return (
     <div style={{
       display: "flex", justifyContent: "space-between", alignItems: "baseline",
       padding: "6px 0", borderBottom: "1px solid #0a1628",
     }}>
       <span style={{ color: "#4a7fa5", fontSize: 11 }}>{label}</span>
-      <span style={{ fontFamily: "monospace", fontSize: 13, color: highlight ? "#7dd3fc" : "#c8d8f0" }}>
+      <span style={{ fontFamily: "monospace", fontSize: 13, color: "#c8d8f0" }}>
         {value}
         {unit && <span style={{ fontSize: 9, color: "#2d5a8a", marginLeft: 4 }}>{unit}</span>}
       </span>
@@ -46,24 +48,20 @@ function MetricRow({ label, value, unit, highlight }) {
 function Card({ children, accent }) {
   return (
     <div style={{
-      background: "#070d1a",
-      border: `1px solid ${accent || "#132040"}`,
-      borderRadius: 6,
-      padding: "16px 18px",
-      marginBottom: 16,
+      background: "#070d1a", border: `1px solid ${accent || "#132040"}`,
+      borderRadius: 6, padding: "16px 18px", marginBottom: 16,
     }}>
       {children}
     </div>
   );
 }
 
-function NumInput({ label, value, onChange, min, max, step, unit }) {
+function NumInput({ label, value, onChange, min, max, step, unit, dimLabel }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-      <span style={{ color: "#4a7fa5", fontSize: 10, flex: 1 }}>{label}</span>
+      <span style={{ color: dimLabel ? "#2d5a8a" : "#4a7fa5", fontSize: 10, flex: 1 }}>{label}</span>
       <input
-        type="number" min={min} max={max} step={step}
-        value={value}
+        type="number" min={min} max={max} step={step} value={value}
         onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange(v); }}
         style={{
           width: 80, background: "#0a1628", border: "1px solid #1e3a6b",
@@ -71,17 +69,187 @@ function NumInput({ label, value, onChange, min, max, step, unit }) {
           fontFamily: "monospace", fontSize: 12, outline: "none", textAlign: "right",
         }}
       />
-      {unit && <span style={{ color: "#2d5a8a", fontSize: 9, width: 40 }}>{unit}</span>}
+      {unit && <span style={{ color: "#2d5a8a", fontSize: 9, width: 52 }}>{unit}</span>}
+    </div>
+  );
+}
+
+// ─── Monthly HDD bar chart ────────────────────────────────────────────────────
+const MONTH_ABBR = ["J","F","M","A","M","J","J","A","S","O","N","D"];
+
+function MonthlyHDDChart({ monthlyHDD, monthlyStats }) {
+  const maxHDD   = Math.max(...monthlyHDD, 1);
+  const barH     = 60;
+
+  return (
+    <div>
+      <div style={{
+        display: "grid", gridTemplateColumns: "repeat(12, 1fr)",
+        gap: 3, alignItems: "end", height: barH + 32,
+      }}>
+        {monthlyHDD.map((hdd, i) => {
+          const frac    = hdd / maxHDD;
+          const h       = Math.max(2, Math.round(frac * barH));
+          const meanT   = monthlyStats ? monthlyStats[i].meanTemp : null;
+          const isCold  = meanT !== null && meanT < 5;
+          const barColor = isCold ? "#38bdf8" : hdd > 0 ? "#60a5fa" : "#1e3a6b";
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+              {/* Tooltip-style HDD value on hover handled via title */}
+              <div
+                title={`${MONTH_ABBR[i]}: ${hdd.toFixed(0)} K·day${meanT !== null ? `  (mean ${meanT.toFixed(1)}°C)` : ""}`}
+                style={{
+                  width: "100%", height: h, background: barColor,
+                  borderRadius: "2px 2px 0 0", cursor: "default",
+                  alignSelf: "flex-end",
+                }}
+              />
+              <span style={{ color: "#2d5a8a", fontSize: 8 }}>{MONTH_ABBR[i]}</span>
+            </div>
+          );
+        })}
+      </div>
+      {/* Y-axis label */}
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+        <span style={{ color: "#1e3a6b", fontSize: 8 }}>0</span>
+        <span style={{ color: "#1e3a6b", fontSize: 8 }}>{maxHDD.toFixed(0)} K·day</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Monthly temperature sparkline ───────────────────────────────────────────
+function MonthlyTempTable({ monthlyStats, baseTemp }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "2px 6px", marginTop: 8 }}>
+      {monthlyStats.map(m => {
+        const isHeating = m.meanTemp < baseTemp;
+        return (
+          <div key={m.name} style={{
+            background: "#0a1628", borderRadius: 3, padding: "5px 7px",
+            border: `1px solid ${isHeating ? "#1e3a6b" : "#132040"}`,
+          }}>
+            <div style={{ color: "#2d5a8a", fontSize: 8, marginBottom: 2 }}>{m.name}</div>
+            <div style={{
+              fontFamily: "monospace", fontSize: 11,
+              color: m.meanTemp < 0 ? "#38bdf8" : m.meanTemp < 10 ? "#7dd3fc" : m.meanTemp < 18 ? "#c8d8f0" : "#fbbf24",
+            }}>
+              {m.meanTemp.toFixed(1)}°C
+            </div>
+            <div style={{ color: "#1e3a6b", fontSize: 7, marginTop: 1 }}>
+              {m.minTemp.toFixed(0)} / {m.maxTemp.toFixed(0)}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── EPW drop-zone / file picker ──────────────────────────────────────────────
+function EPWDropZone({ onLoad, error }) {
+  const inputRef = useRef(null);
+  const [dragging, setDragging] = useState(false);
+
+  const readFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => onLoad(e.target.result, file.name);
+    reader.readAsText(file);
+  };
+
+  const onDrop = useCallback((e) => {
+    e.preventDefault(); setDragging(false);
+    readFile(e.dataTransfer.files[0]);
+  }, [onLoad]);
+
+  const onDragOver = (e) => { e.preventDefault(); setDragging(true); };
+  const onDragLeave = () => setDragging(false);
+
+  return (
+    <div
+      onClick={() => inputRef.current.click()}
+      onDrop={onDrop} onDragOver={onDragOver} onDragLeave={onDragLeave}
+      style={{
+        border: `1px dashed ${dragging ? "#38bdf8" : error ? "#f87171" : "#1e3a6b"}`,
+        borderRadius: 5, padding: "18px 16px", textAlign: "center",
+        cursor: "pointer", transition: "border-color 0.15s",
+        background: dragging ? "#0a1e38" : "transparent",
+      }}
+    >
+      <div style={{ color: dragging ? "#38bdf8" : "#2d5a8a", fontSize: 11, marginBottom: 4 }}>
+        Drop an EPW file here, or click to browse
+      </div>
+      <div style={{ color: "#1e3a6b", fontSize: 9 }}>
+        EnergyPlus Weather (.epw) — from{" "}
+        <span style={{ color: "#2d5a8a" }}>climate.onebuilding.org</span> or EnergyPlus.net
+      </div>
+      {error && (
+        <div style={{ color: "#f87171", fontSize: 9, marginTop: 6 }}>{error}</div>
+      )}
+      <input
+        ref={inputRef} type="file" accept=".epw" style={{ display: "none" }}
+        onChange={e => readFile(e.target.files[0])}
+      />
     </div>
   );
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function HeatSummary() {
-  const [hdd, setHdd] = useState(2500);
+  // EPW state
+  const [epwData,    setEpwData]    = useState(null);   // parsed EPW result
+  const [epwName,    setEpwName]    = useState(null);   // filename
+  const [epwError,   setEpwError]   = useState(null);
+  const [baseTemp,   setBaseTemp]   = useState(15.5);   // °C — CIBSE UK default
+
+  // HDD: derived from EPW when available, otherwise user-editable
+  const [hddManual,  setHddManual]  = useState(2500);
+  const [hddOverride, setHddOverride] = useState(false); // user overriding EPW value
 
   const pb = useMemo(loadProcessedBuilding, []);
 
+  // ── Auto-load bundled Kew EPW on first mount ────────────────────────────────
+  useEffect(() => {
+    try {
+      const data = parseEPW(kewEPWRaw);
+      setEpwData(data);
+      setEpwName("GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw");
+    } catch (err) {
+      setEpwError(err.message || "Failed to parse bundled EPW file.");
+    }
+  }, []);
+
+  // ── EPW load handler ────────────────────────────────────────────────────────
+  const handleEPWLoad = useCallback((text, filename) => {
+    try {
+      const data = parseEPW(text);
+      setEpwData(data);
+      setEpwName(filename);
+      setEpwError(null);
+      setHddOverride(false);  // reset override when new file loaded
+    } catch (err) {
+      setEpwError(err.message || "Failed to parse EPW file.");
+    }
+  }, []);
+
+  const clearEPW = () => { setEpwData(null); setEpwName(null); setEpwError(null); };
+
+  // ── Derived climate values ──────────────────────────────────────────────────
+  const epwHDD = useMemo(() => {
+    if (!epwData) return null;
+    return computeHDD(epwData.hourly, baseTemp);
+  }, [epwData, baseTemp]);
+
+  const monthlyHDD = useMemo(() => {
+    if (!epwData) return null;
+    return computeMonthlyHDD(epwData.hourly, baseTemp);
+  }, [epwData, baseTemp]);
+
+  // Active HDD value used in calculations
+  const hdd = epwData && !hddOverride ? epwHDD : hddManual;
+
+  // ── Building model ──────────────────────────────────────────────────────────
   if (!pb || pb.rooms.length === 0) {
     return (
       <div style={{
@@ -94,38 +262,28 @@ export default function HeatSummary() {
   }
 
   const { summary } = pb;
-  const hlc = summary.fabricHeatLossCoeff;            // W/K
+  const hlc = summary.fabricHeatLossCoeff; // W/K
 
   // Q (kWh) = HLC (W/K) × HDD (K·day) × 24 h/day ÷ 1000
-  const conductiveLoss = (hlc * hdd * 24) / 1000;    // kWh
+  const conductiveLoss = (hlc * hdd * 24) / 1000;
 
-  // Per-element breakdown: walls, glazing, doors, floors, roofs
+  // ── Per-element HLC breakdown ───────────────────────────────────────────────
   const heatedRooms = pb.rooms.filter(r => r.isHeated);
 
-  const wallHLC    = heatedRooms.flatMap(r => r.walls)
+  const wallHLC   = heatedRooms.flatMap(r => r.walls)
     .filter(w => w.adjacency === "external")
     .reduce((s, w) => s + w.heatLossCoeff, 0);
+  const windowHLC = heatedRooms.flatMap(r => r.walls).flatMap(w => w.openings)
+    .filter(o => o.type === "window").reduce((s, o) => s + o.heatLossCoeff, 0);
+  const doorHLC   = heatedRooms.flatMap(r => r.walls).flatMap(w => w.openings)
+    .filter(o => o.type === "door").reduce((s, o) => s + o.heatLossCoeff, 0);
+  const floorHLC  = heatedRooms.map(r => r.floor)
+    .filter(f => f.adjacency === "ground").reduce((s, f) => s + f.heatLossCoeff, 0);
+  const roofHLC   = heatedRooms.map(r => r.roof)
+    .filter(f => f.adjacency === "external").reduce((s, f) => s + f.heatLossCoeff, 0);
 
-  const windowHLC  = heatedRooms.flatMap(r => r.walls)
-    .flatMap(w => w.openings)
-    .filter(o => o.type === "window")
-    .reduce((s, o) => s + o.heatLossCoeff, 0);
-
-  const doorHLC    = heatedRooms.flatMap(r => r.walls)
-    .flatMap(w => w.openings)
-    .filter(o => o.type === "door")
-    .reduce((s, o) => s + o.heatLossCoeff, 0);
-
-  const floorHLC   = heatedRooms.map(r => r.floor)
-    .filter(f => f.adjacency === "ground")
-    .reduce((s, f) => s + f.heatLossCoeff, 0);
-
-  const roofHLC    = heatedRooms.map(r => r.roof)
-    .filter(f => f.adjacency === "external")
-    .reduce((s, f) => s + f.heatLossCoeff, 0);
-
-  const toKwh = (hlcVal) => ((hlcVal * hdd * 24) / 1000).toFixed(0);
-  const pct   = (hlcVal) => hlc > 0 ? ((hlcVal / hlc) * 100).toFixed(1) : "0.0";
+  const toKwh = (v) => ((v * hdd * 24) / 1000).toFixed(0);
+  const pct   = (v) => hlc > 0 ? ((v / hlc) * 100).toFixed(1) : "0.0";
 
   const elementRows = [
     { label: "Opaque walls",   hlcVal: wallHLC,   color: "#60a5fa" },
@@ -135,7 +293,6 @@ export default function HeatSummary() {
     { label: "Roof / ceiling", hlcVal: roofHLC,   color: "#fbbf24" },
   ];
 
-  // Simple horizontal bar (percentage of total HLC)
   const Bar = ({ hlcVal, color }) => {
     const width = hlc > 0 ? (hlcVal / hlc) * 100 : 0;
     return (
@@ -145,47 +302,190 @@ export default function HeatSummary() {
     );
   };
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div style={{
       flex: 1, display: "flex", flexDirection: "column", background: "#05090f",
       color: "#c8d8f0", fontFamily: "monospace", overflow: "hidden",
     }}>
-      {/* Header bar */}
+      {/* Header */}
       <div style={{
-        display: "flex", alignItems: "center", gap: 8,
-        height: 46, padding: "0 20px", background: "#070d1a",
+        display: "flex", alignItems: "center", gap: 8, height: 46,
+        padding: "0 20px", background: "#070d1a",
         borderBottom: "1px solid #132040", flexShrink: 0,
       }}>
         <span style={{ color: "#38bdf8", fontWeight: 700, fontSize: 11, letterSpacing: "0.18em" }}>
           HEAT SUMMARY
         </span>
+        {epwName && (
+          <span style={{ color: "#2d5a8a", fontSize: 9, marginLeft: 4 }}>
+            ● {epwName}
+          </span>
+        )}
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "24px 24px" }}>
-        <div style={{ maxWidth: 640, margin: "0 auto", display: "flex", flexDirection: "column", gap: 0 }}>
+      <div style={{ flex: 1, overflowY: "auto", padding: "24px" }}>
+        <div style={{ maxWidth: 640, margin: "0 auto" }}>
 
-          {/* ── Inputs ── */}
+          {/* ── EPW file ── */}
           <Card>
-            <SectionHeader label="INPUTS" />
-            <NumInput
-              label="Heating degree days"
-              value={hdd}
-              onChange={setHdd}
-              min={0} max={8000} step={50}
-              unit="K·day/yr"
-            />
-            <div style={{ color: "#1e3a6b", fontSize: 8, marginTop: 8, lineHeight: 1.7 }}>
-              Annual sum of (base temperature − mean daily outside temperature) for all days
-              where heating is needed. Typical UK values: 1800–3500 K·day/yr.
-            </div>
+            <SectionHeader label="WEATHER FILE (EPW)" />
+            {!epwData ? (
+              <EPWDropZone onLoad={handleEPWLoad} error={epwError} />
+            ) : (
+              <div>
+                {/* Location summary */}
+                <div style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "flex-start",
+                  marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #132040",
+                }}>
+                  <div>
+                    <div style={{ color: "#7dd3fc", fontSize: 13, fontWeight: 700 }}>
+                      {epwData.location.city}
+                      {epwData.location.region ? `, ${epwData.location.region}` : ""}
+                    </div>
+                    <div style={{ color: "#4a7fa5", fontSize: 10, marginTop: 3 }}>
+                      {epwData.location.country}
+                      {epwData.location.wmo ? `  ·  WMO ${epwData.location.wmo}` : ""}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div style={{ color: "#c8d8f0", fontSize: 10, fontFamily: "monospace" }}>
+                      {epwData.location.latitude.toFixed(2)}°{epwData.location.latitude >= 0 ? "N" : "S"}
+                      {"  "}
+                      {Math.abs(epwData.location.longitude).toFixed(2)}°{epwData.location.longitude >= 0 ? "E" : "W"}
+                    </div>
+                    <div style={{ color: "#2d5a8a", fontSize: 9, marginTop: 2 }}>
+                      {epwData.location.elevation}m elev · UTC{epwData.location.timezone >= 0 ? "+" : ""}{epwData.location.timezone}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Base temperature */}
+                <div style={{ marginBottom: 14 }}>
+                  <NumInput
+                    label="Base (balance-point) temperature"
+                    value={baseTemp}
+                    onChange={setBaseTemp}
+                    min={5} max={22} step={0.5}
+                    unit="°C"
+                  />
+                  <div style={{ color: "#1e3a6b", fontSize: 8, marginTop: 5, lineHeight: 1.6 }}>
+                    15.5°C — CIBSE UK standard &nbsp;·&nbsp; 15°C — common European standard
+                  </div>
+                </div>
+
+                {/* Monthly HDD chart */}
+                {monthlyHDD && (
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ color: "#2d5a8a", fontSize: 9, marginBottom: 8, letterSpacing: "0.1em" }}>
+                      MONTHLY HEATING DEGREE DAYS
+                    </div>
+                    <MonthlyHDDChart monthlyHDD={monthlyHDD} monthlyStats={epwData.monthly} />
+                  </div>
+                )}
+
+                {/* Monthly temperature mini-table */}
+                {epwData.monthly && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ color: "#2d5a8a", fontSize: 9, marginBottom: 4, letterSpacing: "0.1em" }}>
+                      MEAN DAILY TEMPERATURE &nbsp;<span style={{ color: "#1e3a6b" }}>( min / max recorded °C )</span>
+                    </div>
+                    <MonthlyTempTable monthlyStats={epwData.monthly} baseTemp={baseTemp} />
+                  </div>
+                )}
+
+                {/* Computed HDD */}
+                <div style={{
+                  marginTop: 14, paddingTop: 12, borderTop: "1px solid #132040",
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                }}>
+                  <div>
+                    <span style={{ color: "#4a7fa5", fontSize: 10 }}>Annual HDD from file </span>
+                    <span style={{ color: "#1e3a6b", fontSize: 9 }}>
+                      (base {baseTemp}°C)
+                    </span>
+                  </div>
+                  <span style={{ color: "#7dd3fc", fontFamily: "monospace", fontSize: 14 }}>
+                    {epwHDD.toFixed(0)}
+                    <span style={{ fontSize: 9, color: "#2d5a8a", marginLeft: 4 }}>K·day/yr</span>
+                  </span>
+                </div>
+
+                <button
+                  onClick={clearEPW}
+                  style={{
+                    marginTop: 12, width: "100%", padding: "6px", background: "transparent",
+                    border: "1px solid #1e3a6b", color: "#2d5a8a", borderRadius: 4,
+                    cursor: "pointer", fontSize: 9, fontFamily: "monospace", letterSpacing: "0.1em",
+                  }}
+                >
+                  CLEAR — use manual HDD
+                </button>
+              </div>
+            )}
           </Card>
 
-          {/* ── Building summary ── */}
+          {/* ── HDD input (manual, or EPW override) ── */}
+          <Card>
+            <SectionHeader label={epwData && !hddOverride ? "HEATING DEGREE DAYS — FROM EPW" : "HEATING DEGREE DAYS"} />
+            {epwData && !hddOverride ? (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <span style={{ color: "#7dd3fc", fontFamily: "monospace", fontSize: 18 }}>
+                    {epwHDD.toFixed(0)}
+                  </span>
+                  <span style={{ color: "#2d5a8a", fontSize: 9, marginLeft: 6 }}>K·day/yr</span>
+                </div>
+                <button
+                  onClick={() => { setHddManual(Math.round(epwHDD)); setHddOverride(true); }}
+                  style={{
+                    padding: "4px 10px", background: "transparent",
+                    border: "1px solid #1e3a6b", color: "#2d5a8a", borderRadius: 4,
+                    cursor: "pointer", fontSize: 9, fontFamily: "monospace",
+                  }}
+                >
+                  OVERRIDE
+                </button>
+              </div>
+            ) : (
+              <div>
+                <NumInput
+                  label="Heating degree days"
+                  value={hddManual}
+                  onChange={setHddManual}
+                  min={0} max={8000} step={50}
+                  unit="K·day/yr"
+                  dimLabel={epwData && hddOverride}
+                />
+                {epwData && hddOverride && (
+                  <button
+                    onClick={() => setHddOverride(false)}
+                    style={{
+                      marginTop: 8, padding: "3px 8px", background: "transparent",
+                      border: "1px solid #1e3a6b", color: "#2d5a8a", borderRadius: 3,
+                      cursor: "pointer", fontSize: 8, fontFamily: "monospace",
+                    }}
+                  >
+                    ↩ REVERT TO EPW VALUE ({epwHDD.toFixed(0)})
+                  </button>
+                )}
+                {!epwData && (
+                  <div style={{ color: "#1e3a6b", fontSize: 8, marginTop: 8, lineHeight: 1.7 }}>
+                    Annual sum of (base temp − mean daily outside temp). UK typical: 1800–3500 K·day/yr.
+                    Load an EPW file above for site-specific values.
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
+
+          {/* ── Building envelope ── */}
           <Card>
             <SectionHeader label="BUILDING ENVELOPE" />
-            <MetricRow label="Heated floor area"     value={summary.totalFloorArea.toFixed(1)}    unit="m²" />
-            <MetricRow label="Heated volume"         value={summary.totalVolume.toFixed(1)}        unit="m³" />
-            <MetricRow label="Total envelope area"   value={summary.totalEnvelopeArea.toFixed(1)}  unit="m²" />
+            <MetricRow label="Heated floor area"      value={summary.totalFloorArea.toFixed(1)}   unit="m²" />
+            <MetricRow label="Heated volume"          value={summary.totalVolume.toFixed(1)}       unit="m³" />
+            <MetricRow label="Total envelope area"    value={summary.totalEnvelopeArea.toFixed(1)} unit="m²" />
             <MetricRow label="Average fabric U-value" value={summary.avgFabricU.toFixed(3)}        unit="W/m²K" />
           </Card>
 
@@ -193,7 +493,7 @@ export default function HeatSummary() {
           <Card accent="#1e3a6b">
             <SectionHeader label="CONDUCTIVE FABRIC LOSSES" />
 
-            {/* Total */}
+            {/* Headline total */}
             <div style={{
               display: "flex", justifyContent: "space-between", alignItems: "baseline",
               padding: "10px 0 14px", borderBottom: "1px solid #132040", marginBottom: 14,
@@ -216,7 +516,7 @@ export default function HeatSummary() {
               </div>
             </div>
 
-            {/* Per-element rows */}
+            {/* Per-element breakdown */}
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {elementRows.map(({ label, hlcVal, color }) => (
                 <div key={label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -234,7 +534,7 @@ export default function HeatSummary() {
               ))}
             </div>
 
-            {/* Per m² intensity */}
+            {/* Intensity */}
             {summary.totalFloorArea > 0 && (
               <div style={{
                 marginTop: 16, paddingTop: 12, borderTop: "1px solid #132040",
