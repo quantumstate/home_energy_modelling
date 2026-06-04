@@ -2,11 +2,13 @@ import { useState } from "react";
 import FloorPlanUI from "./FloorPlanUI.jsx";
 import ThreeDView from "./ThreeDView.jsx";
 import UValueCalculator from "./UValueCalculator.jsx";
+import HeatSummary from "./HeatSummary.jsx";
 
 const TABS = [
   { id: "floor-plan", label: "Floor plan" },
   { id: "3d-view", label: "3d view" },
   { id: "u-value-calculator", label: "u value calculator" },
+  { id: "heat-summary", label: "heat summary" },
 ];
 
 function App() {
@@ -67,6 +69,7 @@ function App() {
         {activeTab === "floor-plan" && <FloorPlanUI />}
         {activeTab === "3d-view" && <ThreeDView />}
         {activeTab === "u-value-calculator" && <UValueCalculator />}
+        {activeTab === "heat-summary" && <HeatSummary />}
       </main>
     </div>
   );
