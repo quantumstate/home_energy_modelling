@@ -287,29 +287,6 @@ export default function UValueCalculator() {
               BUILDING ELEMENTS WITH OUTSIDE-TO-INSIDE LAYER BUILD-UPS
             </div>
           </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <select
-              data-testid="new-element-type"
-              value={newElementType}
-              onChange={(event) => setNewElementType(event.target.value)}
-              style={{ ...fieldStyle, width: 126, height: 34, padding: "0 8px", textTransform: "uppercase" }}
-            >
-              {ELEMENT_TYPES.map((type) => (
-                <option key={type} value={type}>
-                  {type}
-                </option>
-              ))}
-            </select>
-            <button
-              data-testid="add-element"
-              type="button"
-              onClick={addElement}
-              style={{ ...buttonStyle, height: 34, padding: "0 12px", color: "#7dd3fc", borderColor: "#2563eb" }}
-            >
-              ADD ELEMENT
-            </button>
-          </div>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "230px minmax(720px, 1fr) 290px", gap: 16, alignItems: "start" }}>
@@ -351,6 +328,29 @@ export default function UValueCalculator() {
                   </button>
                 );
               })}
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
+              <select
+                data-testid="new-element-type"
+                value={newElementType}
+                onChange={(event) => setNewElementType(event.target.value)}
+                style={{ ...fieldStyle, width: 126, height: 34, padding: "0 8px", textTransform: "uppercase" }}
+              >
+                {ELEMENT_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
+                  </option>
+                ))}
+              </select>
+              <button
+                data-testid="add-element"
+                type="button"
+                onClick={addElement}
+                style={{ ...buttonStyle, height: 34, padding: "0 12px", color: "#7dd3fc", borderColor: "#2563eb" }}
+              >
+                ADD ELEMENT
+              </button>
             </div>
           </aside>
 
