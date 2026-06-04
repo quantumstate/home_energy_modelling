@@ -24,174 +24,116 @@ const loadProcessedBuilding = () => {
   }
 };
 
-// Create wall geometry with window/door openings
-const createWallWithOpenings = (ptA, ptB, height, openings) => {
+// Create wall geometry with window/door openings.
+//
+// Geometry is built in wall-local space (wall runs along local +X, height along
+// local +Y, thickness along local +Z) then the group is rotated around world Y
+// and translated to ptA so it lands in the right place in the scene.
+//
+// Floor plan (x, y) maps to 3D (x, elevation, y) — Three.js Y-up convention.
+const createWallWithOpenings = (ptA, ptB, wallHeight, openings) => {
   const group = new THREE.Group();
-  
-  const wallLength = Math.sqrt((ptB.x - ptA.x) ** 2 + (ptB.y - ptA.y) ** 2);
-  const direction = {
-    x: (ptB.x - ptA.x) / wallLength,
-    y: (ptB.y - ptA.y) / wallLength,
-  };
-  
-  // Sort openings by offset
+  const wallThickness = 0.15;
+
+  const dx = ptB.x - ptA.x;
+  const dy = ptB.y - ptA.y;
+  const wallLength = Math.sqrt(dx * dx + dy * dy);
+  if (wallLength < 0.01) return group;
+
+  // Rotate group around Y so local +X aligns with wall direction in XZ plane.
+  // Floor plan +y maps to 3D +z, so wall angle uses atan2(dy, dx).
+  group.rotation.y = -Math.atan2(dy, dx);
+  // Position group at ptA (floor plan → world: x stays x, y → z).
+  // Elevation (Y) is applied by the caller via group.position.y.
+  group.position.set(ptA.x, 0, ptA.y);
+
+  // Build segment list (same logic as before, independent of direction).
   const sortedOpenings = [...openings].sort((a, b) => a.offset - b.offset);
-  
-  let wallSegments = [];
+  const wallSegments = [];
   let currentPos = 0;
-  
-  // Create wall segments between openings
+
   for (const opening of sortedOpenings) {
     const openStart = Math.max(0, opening.offset);
-    const openEnd = Math.min(wallLength, opening.offset + opening.width);
-    
+    const openEnd   = Math.min(wallLength, opening.offset + opening.width);
     if (openEnd <= openStart || openStart >= wallLength) continue;
-    
-    // Add solid wall segment before opening
-    if (currentPos < openStart) {
+
+    if (currentPos < openStart)
       wallSegments.push({ start: currentPos, end: openStart, hasOpening: false });
-    }
-    
-    // Add opening
+
     wallSegments.push({
-      start: openStart,
-      end: openEnd,
-      hasOpening: true,
-      type: opening.type,
-      opening: opening,
-      height: opening.height || (opening.type === "window" ? 1.2 : 2.1),
-      sillHeight: opening.sillHeight || 0,
+      start: openStart, end: openEnd, hasOpening: true,
+      type:       opening.type,
+      openHeight: opening.height     ?? (opening.type === "window" ? 1.2 : 2.1),
+      sillHeight: opening.sillHeight ?? 0,
     });
-    
     currentPos = openEnd;
   }
-  
-  // Add remaining wall
-  if (currentPos < wallLength) {
+  if (currentPos < wallLength)
     wallSegments.push({ start: currentPos, end: wallLength, hasOpening: false });
-  }
-  
-  // If no openings, create one solid segment
-  if (wallSegments.length === 0) {
+  if (wallSegments.length === 0)
     wallSegments.push({ start: 0, end: wallLength, hasOpening: false });
-  }
-  
-  // Create geometries for each segment
-  for (const segment of wallSegments) {
-    if (segment.hasOpening) {
-      const openingHeight = segment.height;
-      const sillHeight = segment.sillHeight;
-      const wallThickness = 0.15;
-      
-      // Lintel (above opening)
-      if (sillHeight + openingHeight < height) {
-        const lintelHeight = height - (sillHeight + openingHeight);
-        const startPt = {
-          x: ptA.x + direction.x * segment.start,
-          y: ptA.y + direction.y * segment.start,
-        };
-        const endPt = {
-          x: ptA.x + direction.x * segment.end,
-          y: ptA.y + direction.y * segment.end,
-        };
-        
-        const lintelGeom = new THREE.BoxGeometry(
-          segment.end - segment.start,
-          wallThickness,
-          lintelHeight
-        );
-        const lintelMesh = new THREE.Mesh(lintelGeom, new THREE.MeshPhongMaterial({ color: 0xcccccc }));
-        lintelMesh.position.set(
-          (startPt.x + endPt.x) / 2,
-          (startPt.y + endPt.y) / 2,
-          sillHeight + openingHeight + lintelHeight / 2
-        );
-        group.add(lintelMesh);
-      }
-      
-      // Sill (below opening for windows)
-      if (segment.type === "window" && sillHeight > 0) {
-        const startPt = {
-          x: ptA.x + direction.x * segment.start,
-          y: ptA.y + direction.y * segment.start,
-        };
-        const endPt = {
-          x: ptA.x + direction.x * segment.end,
-          y: ptA.y + direction.y * segment.end,
-        };
-        
-        const sillGeom = new THREE.BoxGeometry(
-          segment.end - segment.start,
-          wallThickness,
-          sillHeight
-        );
-        const sillMesh = new THREE.Mesh(sillGeom, new THREE.MeshPhongMaterial({ color: 0xcccccc }));
-        sillMesh.position.set(
-          (startPt.x + endPt.x) / 2,
-          (startPt.y + endPt.y) / 2,
-          sillHeight / 2
-        );
-        group.add(sillMesh);
-      }
-      
-      // Left jamb
-      const leftJambGeom = new THREE.BoxGeometry(wallThickness, wallThickness, segment.type === "window" ? segment.height : height);
-      const leftJambMesh = new THREE.Mesh(leftJambGeom, new THREE.MeshPhongMaterial({ color: 0xaaaaaa }));
-      const startPtL = {
-        x: ptA.x + direction.x * segment.start,
-        y: ptA.y + direction.y * segment.start,
-      };
-      leftJambMesh.position.set(
-        startPtL.x,
-        startPtL.y,
-        (segment.type === "window" ? segment.sillHeight : 0) + (segment.type === "window" ? segment.height : height) / 2
+
+  const solidMat  = new THREE.MeshPhongMaterial({ color: 0xdddddd });
+  const jambMat   = new THREE.MeshPhongMaterial({ color: 0xaaaaaa });
+
+  // All positions are in wall-local space: X = along wall, Y = up, Z = thickness.
+  for (const seg of wallSegments) {
+    const segLen = seg.end - seg.start;
+    const segMid = seg.start + segLen / 2;
+
+    if (!seg.hasOpening) {
+      // Solid wall panel: full height
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(segLen, wallHeight, wallThickness),
+        solidMat,
       );
-      group.add(leftJambMesh);
-      
-      // Right jamb
-      const rightJambGeom = new THREE.BoxGeometry(wallThickness, wallThickness, segment.type === "window" ? segment.height : height);
-      const rightJambMesh = new THREE.Mesh(rightJambGeom, new THREE.MeshPhongMaterial({ color: 0xaaaaaa }));
-      const endPtR = {
-        x: ptA.x + direction.x * segment.end,
-        y: ptA.y + direction.y * segment.end,
-      };
-      rightJambMesh.position.set(
-        endPtR.x,
-        endPtR.y,
-        (segment.type === "window" ? segment.sillHeight : 0) + (segment.type === "window" ? segment.height : height) / 2
-      );
-      group.add(rightJambMesh);
+      mesh.position.set(segMid, wallHeight / 2, 0);
+      group.add(mesh);
     } else {
-      // Solid wall segment
-      const startPt = {
-        x: ptA.x + direction.x * segment.start,
-        y: ptA.y + direction.y * segment.start,
-      };
-      const endPt = {
-        x: ptA.x + direction.x * segment.end,
-        y: ptA.y + direction.y * segment.end,
-      };
-      
-      const wallThickness = 0.15;
-      const wallGeom = new THREE.BoxGeometry(
-        segment.end - segment.start,
-        wallThickness,
-        height
+      const { openHeight, sillHeight, type } = seg;
+      const openMid = seg.start + segLen / 2;
+
+      // Lintel above opening
+      const lintelH = wallHeight - sillHeight - openHeight;
+      if (lintelH > 0.001) {
+        const m = new THREE.Mesh(
+          new THREE.BoxGeometry(segLen, lintelH, wallThickness),
+          solidMat,
+        );
+        m.position.set(openMid, sillHeight + openHeight + lintelH / 2, 0);
+        group.add(m);
+      }
+
+      // Sill below window opening
+      if (type === "window" && sillHeight > 0.001) {
+        const m = new THREE.Mesh(
+          new THREE.BoxGeometry(segLen, sillHeight, wallThickness),
+          solidMat,
+        );
+        m.position.set(openMid, sillHeight / 2, 0);
+        group.add(m);
+      }
+
+      // Vertical jambs either side of the opening
+      const jambH = type === "window" ? openHeight : wallHeight - sillHeight;
+      const jambY = (type === "window" ? sillHeight : 0) + jambH / 2;
+
+      const leftJamb = new THREE.Mesh(
+        new THREE.BoxGeometry(wallThickness, jambH, wallThickness),
+        jambMat,
       );
-      const wallMaterial = new THREE.MeshPhongMaterial({
-        color: 0xdddddd,
-        side: THREE.DoubleSide,
-      });
-      const wallMesh = new THREE.Mesh(wallGeom, wallMaterial);
-      wallMesh.position.set(
-        (startPt.x + endPt.x) / 2,
-        (startPt.y + endPt.y) / 2,
-        height / 2
+      leftJamb.position.set(seg.start, jambY, 0);
+      group.add(leftJamb);
+
+      const rightJamb = new THREE.Mesh(
+        new THREE.BoxGeometry(wallThickness, jambH, wallThickness),
+        jambMat,
       );
-      group.add(wallMesh);
+      rightJamb.position.set(seg.end, jambY, 0);
+      group.add(rightJamb);
     }
   }
-  
+
   return group;
 };
 
@@ -236,7 +178,7 @@ export default function ThreeDView() {
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowShadowMap;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     mountRef.current.appendChild(renderer.domElement);
 
     // Lighting
@@ -255,12 +197,12 @@ export default function ThreeDView() {
     directionalLight.shadow.camera.bottom = -50;
     scene.add(directionalLight);
 
-    // Add ground plane
+    // Add ground plane — rotation.x = -π/2 lays PlaneGeometry flat in the XZ plane at Y=0.
     const groundGeom = new THREE.PlaneGeometry(200, 200);
     const groundMat = new THREE.MeshPhongMaterial({ color: 0x336a28 });
     const ground = new THREE.Mesh(groundGeom, groundMat);
     ground.rotation.x = -Math.PI / 2;
-    ground.position.z = 0;
+    ground.position.y = 0;
     ground.receiveShadow = true;
     scene.add(ground);
 
@@ -279,52 +221,50 @@ export default function ThreeDView() {
       if (!sourceRoom || sourceRoom.points.length < 3) return;
       const points = sourceRoom.points;
 
-      // Walls — use ProcessedWall geometry so adjacency and openings are resolved
+      // Walls
       for (const wall of processedRoom.walls) {
+        // Re-derive opening offsets from ProcessedOpening.worldPosition
         const wallLen = wall.length;
-        const wallDx = wallLen > 0 ? (wall.endPoint.x - wall.startPoint.x) / wallLen : 0;
-        const wallDy = wallLen > 0 ? (wall.endPoint.y - wall.startPoint.y) / wallLen : 0;
+        const wallDx  = wallLen > 0 ? (wall.endPoint.x - wall.startPoint.x) / wallLen : 0;
+        const wallDy  = wallLen > 0 ? (wall.endPoint.y - wall.startPoint.y) / wallLen : 0;
         const openings = wall.openings.map(o => ({
-          type: o.type,
-          // Project worldPosition back to offset along wall
-          offset: (o.worldPosition.x - wall.startPoint.x) * wallDx
-                + (o.worldPosition.y - wall.startPoint.y) * wallDy,
-          width: o.width,
-          height: o.height,
+          type:       o.type,
+          offset:     (o.worldPosition.x - wall.startPoint.x) * wallDx
+                    + (o.worldPosition.y - wall.startPoint.y) * wallDy,
+          width:      o.width,
+          height:     o.height,
           sillHeight: o.sillHeight,
         }));
         const wallGroup = createWallWithOpenings(wall.startPoint, wall.endPoint, ceilingHeight, openings);
-        if (wallGroup) {
-          wallGroup.position.z = zOffset;
-          wallGroup.castShadow = true;
-          wallGroup.receiveShadow = true;
-          scene.add(wallGroup);
-        }
+        // Elevation: Y is up in Three.js — floor plan y maps to world z inside
+        // createWallWithOpenings, so only the vertical offset needs setting here.
+        wallGroup.position.y = zOffset;
+        wallGroup.castShadow = true;
+        wallGroup.receiveShadow = true;
+        scene.add(wallGroup);
       }
 
-      // Floor
+      // Floor / ceiling — ShapeGeometry lies in XY by default; rotate π/2 around X
+      // so floor plan (x, y) maps to world (x, elevation, y) matching the walls.
       const floorShape = new THREE.Shape();
       floorShape.moveTo(points[0].x, points[0].y);
       for (let i = 1; i < points.length; i++) floorShape.lineTo(points[i].x, points[i].y);
-      floorShape.lineTo(points[0].x, points[0].y);
 
       const floorMesh = new THREE.Mesh(
         new THREE.ShapeGeometry(floorShape),
         new THREE.MeshPhongMaterial({ color: 0x333333, side: THREE.DoubleSide }),
       );
-      floorMesh.position.z = zOffset;
-      floorMesh.castShadow = true;
+      floorMesh.rotation.x = Math.PI / 2;
+      floorMesh.position.y = zOffset;
       floorMesh.receiveShadow = true;
       scene.add(floorMesh);
 
-      // Ceiling
       const ceilingMesh = new THREE.Mesh(
         new THREE.ShapeGeometry(floorShape),
         new THREE.MeshPhongMaterial({ color: 0x444444, side: THREE.DoubleSide }),
       );
-      ceilingMesh.position.z = zOffset + ceilingHeight;
-      ceilingMesh.castShadow = true;
-      ceilingMesh.receiveShadow = true;
+      ceilingMesh.rotation.x = Math.PI / 2;
+      ceilingMesh.position.y = zOffset + ceilingHeight;
       scene.add(ceilingMesh);
     });
 
