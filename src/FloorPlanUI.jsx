@@ -283,7 +283,7 @@ function NorthOverlay({ rotation }) {
   const tip = { x: nx, y: ny };
   const b   = { x: cx - Math.sin(r) * (len - hl), y: cy - Math.cos(r) * (len - hl) };
   return (
-    <svg width={S} height={S} style={{ display: "block" }}>
+    <svg width={S} height={S} style={{ display: "block", overflow: "visible" }}>
       <circle cx={cx} cy={cy} r={S / 2 - 1} fill="#070d1a99" stroke="#1e3a6b" strokeWidth={1}/>
       {/* Shaft */}
       <line x1={cx} y1={cy} x2={tip.x} y2={tip.y} stroke="#38bdf8" strokeWidth={1.2}/>
@@ -292,9 +292,9 @@ function NorthOverlay({ rotation }) {
         points={`${tip.x},${tip.y} ${b.x + px * hw},${b.y + py * hw} ${b.x - px * hw},${b.y - py * hw}`}
         fill="#38bdf8"
       />
-      {/* N label */}
-      <text x={tip.x} y={tip.y - 4}
-        textAnchor="middle" dominantBaseline="auto"
+      {/* N label — placed just past the arrowhead along the north direction */}
+      <text x={tip.x - Math.sin(r) * 5} y={tip.y - Math.cos(r) * 5}
+        textAnchor="middle" dominantBaseline="central"
         fontSize={6} fill="#38bdf8" fontWeight="bold"
         style={{ userSelect: "none", fontFamily: "monospace" }}
       >N</text>
