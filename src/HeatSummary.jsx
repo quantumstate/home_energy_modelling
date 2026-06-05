@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { buildingModelFromState, processBuilding } from "./geometryProcessor.js";
 import { parseEPW, computeHDD, computeMonthlyHDD } from "./epwParser.js";
+import { computeMonthlySolarGains } from "./solarGain.js";
 import kewEPWRaw from "./assets/GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw?raw";
 
 // ─── Load processed building from localStorage ────────────────────────────────
@@ -10,10 +11,11 @@ function loadProcessedBuilding() {
     if (raw) return processBuilding(JSON.parse(raw));
   } catch {}
   try {
-    const roomsByStorey  = JSON.parse(localStorage.getItem("floorplan_rooms"))  || { 0: [], 1: [], 2: [] };
-    const ceilingHeights = JSON.parse(localStorage.getItem("floorplan_ceilings")) || { 0: 3.0, 1: 2.7, 2: 2.5 };
-    const globalU        = JSON.parse(localStorage.getItem("floorplan_uvalues")) || null;
-    return processBuilding(buildingModelFromState({ roomsByStorey, ceilingHeights, globalU }));
+    const roomsByStorey    = JSON.parse(localStorage.getItem("floorplan_rooms"))    || { 0: [], 1: [], 2: [] };
+    const ceilingHeights   = JSON.parse(localStorage.getItem("floorplan_ceilings")) || { 0: 3.0, 1: 2.7, 2: 2.5 };
+    const globalU          = JSON.parse(localStorage.getItem("floorplan_uvalues"))  || null;
+    const buildingRotation = JSON.parse(localStorage.getItem("floorplan_rotation")) || 0;
+    return processBuilding(buildingModelFromState({ roomsByStorey, ceilingHeights, globalU, site: { buildingRotation } }));
   } catch {}
   return null;
 }
@@ -146,6 +148,44 @@ function MonthlyTempTable({ monthlyStats, baseTemp }) {
   );
 }
 
+// Representative compass bearing for each 8-direction orientation label
+const ORIENTATION_BEARING = { N: 0, NE: 45, E: 90, SE: 135, S: 180, SW: 225, W: 270, NW: 315 };
+
+// ─── Monthly solar gain bar chart ─────────────────────────────────────────────
+function MonthlySolarChart({ monthlySolar }) {
+  const maxVal = Math.max(...monthlySolar, 1);
+  const barH   = 60;
+  return (
+    <div>
+      <div style={{
+        display: "grid", gridTemplateColumns: "repeat(12, 1fr)",
+        gap: 3, alignItems: "end", height: barH + 32,
+      }}>
+        {monthlySolar.map((kwh, i) => {
+          const h = Math.max(2, Math.round((kwh / maxVal) * barH));
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+              <div
+                title={`${MONTH_ABBR[i]}: ${kwh.toFixed(0)} kWh`}
+                style={{
+                  width: "100%", height: h, borderRadius: "2px 2px 0 0",
+                  background: "linear-gradient(to top, #f59e0b, #fbbf24)",
+                  alignSelf: "flex-end", cursor: "default",
+                }}
+              />
+              <span style={{ color: "#2d5a8a", fontSize: 8 }}>{MONTH_ABBR[i]}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+        <span style={{ color: "#1e3a6b", fontSize: 8 }}>0</span>
+        <span style={{ color: "#1e3a6b", fontSize: 8 }}>{maxVal.toFixed(0)} kWh</span>
+      </div>
+    </div>
+  );
+}
+
 // ─── EPW drop-zone / file picker ──────────────────────────────────────────────
 function EPWDropZone({ onLoad, error }) {
   const inputRef = useRef(null);
@@ -248,6 +288,29 @@ export default function HeatSummary() {
 
   // Active HDD value used in calculations
   const hdd = epwData && !hddOverride ? epwHDD : hddManual;
+
+  // ── Solar gain inputs — group external windows by orientation ───────────────
+  const windowGroups = useMemo(() => {
+    if (!pb) return [];
+    const groups = {};
+    pb.rooms
+      .filter(r => r.isHeated)
+      .flatMap(r => r.walls)
+      .filter(w => w.adjacency === "external")
+      .flatMap(w => w.openings)
+      .filter(o => o.type === "window")
+      .forEach(o => {
+        const or = o.orientation;
+        if (!groups[or]) groups[or] = { orientation: or, bearing: ORIENTATION_BEARING[or] ?? 0, effectiveArea: 0 };
+        groups[or].effectiveArea += o.area * o.solarHeatGainCoeff;
+      });
+    return Object.values(groups);
+  }, [pb]);
+
+  const solarGains = useMemo(() => {
+    if (!epwData || !windowGroups.length) return null;
+    return computeMonthlySolarGains(epwData.hourly, epwData.location, windowGroups);
+  }, [epwData, windowGroups]);
 
   // ── Building model ──────────────────────────────────────────────────────────
   if (!pb || pb.rooms.length === 0) {
@@ -548,6 +611,91 @@ export default function HeatSummary() {
               </div>
             )}
           </Card>
+
+          {/* ── Solar gains ── */}
+          {solarGains ? (
+            <Card accent="#78350f">
+              <SectionHeader label="SOLAR GAINS THROUGH GLAZING" />
+
+              {/* Headline */}
+              <div style={{
+                display: "flex", justifyContent: "space-between", alignItems: "baseline",
+                padding: "10px 0 14px", borderBottom: "1px solid #132040", marginBottom: 14,
+              }}>
+                <div>
+                  <div style={{ color: "#fbbf24", fontSize: 22, fontFamily: "monospace", fontWeight: 700 }}>
+                    {solarGains.annualKwh.toFixed(0)}
+                    <span style={{ fontSize: 12, color: "#78350f", marginLeft: 6 }}>kWh/yr</span>
+                  </div>
+                  <div style={{ color: "#78350f", fontSize: 9, marginTop: 3 }}>
+                    DNI × cos θ + isotropic diffuse + ground-reflected, summed over all hours
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ color: "#fbbf24", fontSize: 11, fontFamily: "monospace" }}>
+                    {windowGroups.reduce((s, g) => s + g.effectiveArea, 0).toFixed(2)}
+                    <span style={{ fontSize: 9, color: "#78350f", marginLeft: 4 }}>m² eff.</span>
+                  </div>
+                  <div style={{ color: "#78350f", fontSize: 9, marginTop: 2 }}>Σ area × SHGC</div>
+                </div>
+              </div>
+
+              {/* Monthly chart */}
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ color: "#78350f", fontSize: 9, marginBottom: 8, letterSpacing: "0.1em" }}>
+                  MONTHLY SOLAR GAIN
+                </div>
+                <MonthlySolarChart monthlySolar={solarGains.monthly} />
+              </div>
+
+              {/* By orientation */}
+              {Object.keys(solarGains.byOrientation).length > 0 && (
+                <div>
+                  <div style={{ color: "#78350f", fontSize: 9, marginBottom: 8, letterSpacing: "0.1em" }}>
+                    BY ORIENTATION
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {Object.entries(solarGains.byOrientation)
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([or, kwh]) => {
+                        const width = solarGains.annualKwh > 0 ? (kwh / solarGains.annualKwh) * 100 : 0;
+                        return (
+                          <div key={or} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ width: 28, color: "#fbbf24", fontSize: 10, fontFamily: "monospace" }}>{or}</div>
+                            <div style={{ flex: 1, height: 6, background: "#0a1628", borderRadius: 3, overflow: "hidden" }}>
+                              <div style={{ width: `${width}%`, height: "100%", background: "#f59e0b", borderRadius: 3 }} />
+                            </div>
+                            <div style={{ width: 72, textAlign: "right", color: "#c8d8f0", fontSize: 11, fontFamily: "monospace" }}>
+                              {kwh.toFixed(0)}
+                              <span style={{ fontSize: 8, color: "#78350f", marginLeft: 3 }}>kWh</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+
+              {/* Net balance */}
+              <div style={{
+                marginTop: 16, paddingTop: 12, borderTop: "1px solid #132040",
+                display: "flex", justifyContent: "space-between", alignItems: "baseline",
+              }}>
+                <span style={{ color: "#4a7fa5", fontSize: 10 }}>Net fabric losses (conductive − solar)</span>
+                <span style={{ fontFamily: "monospace", fontSize: 13, color: "#c8d8f0" }}>
+                  {(conductiveLoss - solarGains.annualKwh).toFixed(0)}
+                  <span style={{ fontSize: 9, color: "#2d5a8a", marginLeft: 4 }}>kWh/yr</span>
+                </span>
+              </div>
+            </Card>
+          ) : epwData && windowGroups.length === 0 ? (
+            <Card>
+              <SectionHeader label="SOLAR GAINS THROUGH GLAZING" />
+              <div style={{ color: "#2d5a8a", fontSize: 10 }}>
+                No external windows found in the heated floor plan. Add windows to external walls to see solar gains.
+              </div>
+            </Card>
+          ) : null}
 
           {/* ── Warnings ── */}
           {summary.warnings.length > 0 && (
