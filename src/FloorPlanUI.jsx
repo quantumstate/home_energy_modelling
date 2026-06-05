@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { buildingModelFromState } from "./geometryProcessor.js";
 import { STOREY_LABELS as STOREY_LABELS_CONST, DEFAULT_U_VALUES } from "./constants.js";
+import { recorder } from "./sessionRecorder.js";
+import ReplayPanel from "./ReplayPanel.jsx";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PPM  = 60;
@@ -172,6 +174,134 @@ function Section({ label, open, onToggle, children, accent }) {
   );
 }
 
+// ─── Compass helpers ──────────────────────────────────────────────────────────
+
+/** Convert a bearing (0–360, CW from north) to an 8-point cardinal label. */
+function bearingLabel(deg) {
+  const dirs = ["N","NE","E","SE","S","SW","W","NW"];
+  return dirs[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+}
+
+/**
+ * Full interactive compass rose.
+ *
+ * buildingRotation = degrees CW from north to the floor plan's +X (rightward) axis.
+ *   0°  → north is UP   on the floor plan (standard map orientation)
+ *   90° → north is LEFT on the floor plan (+X = east)
+ *
+ * The needle always points toward north. SVG rotation of needle = -buildingRotation.
+ */
+function CompassWidget({ rotation }) {
+  const S = 112, cx = S / 2, cy = S / 2, R = 46;
+  const toRad = d => d * Math.PI / 180;
+
+  // Eight tick marks; major = cardinal (0/90/180/270)
+  const ticks = Array.from({ length: 16 }, (_, i) => i * 22.5);
+
+  return (
+    <svg width={S} height={S} style={{ display: "block", margin: "0 auto" }}>
+      {/* Outer ring */}
+      <circle cx={cx} cy={cy} r={R} fill="#0a1628" stroke="#1e3a6b" strokeWidth={1.5}/>
+
+      {/* Tick marks */}
+      {ticks.map(deg => {
+        const rad     = toRad(deg - 90);          // SVG: 0° = right; -90° offset → 0° = up
+        const isMaj   = deg % 90 === 0;
+        const isMinor = deg % 45 === 0 && !isMaj;
+        const r1 = R - 1;
+        const r2 = R - (isMaj ? 9 : isMinor ? 6 : 4);
+        return (
+          <line key={deg}
+            x1={cx + r1 * Math.cos(rad)} y1={cy + r1 * Math.sin(rad)}
+            x2={cx + r2 * Math.cos(rad)} y2={cy + r2 * Math.sin(rad)}
+            stroke={isMaj ? "#2d5a8a" : "#1a3050"}
+            strokeWidth={isMaj ? 1.5 : 1}
+          />
+        );
+      })}
+
+      {/* Cardinal labels — fixed */}
+      {[
+        { l: "N", dx:  0,       dy: -(R-12), color: "#38bdf8", fw: "bold",   fs: 10 },
+        { l: "S", dx:  0,       dy:   R-12,  color: "#2d5a8a", fw: "normal", fs: 8  },
+        { l: "E", dx:  R-12,    dy:  0,      color: "#2d5a8a", fw: "normal", fs: 8  },
+        { l: "W", dx: -(R-12),  dy:  0,      color: "#2d5a8a", fw: "normal", fs: 8  },
+      ].map(({ l, dx, dy, color, fw, fs }) => (
+        <text key={l}
+          x={cx + dx} y={cy + dy}
+          textAnchor="middle" dominantBaseline="middle"
+          fontSize={fs} fill={color} fontWeight={fw}
+          style={{ userSelect: "none", fontFamily: "monospace" }}
+        >{l}</text>
+      ))}
+
+      {/* Needle — rotates so its tip always points toward north on the floor plan.
+          SVG rotate(-buildingRotation) because:
+            rotation=0  → needle up (north is up)   ✓
+            rotation=90 → needle left (north is left when +X=east) ✓  */}
+      <g transform={`rotate(${-rotation}, ${cx}, ${cy})`}>
+        {/* North half — bright */}
+        <polygon
+          points={`
+            ${cx},         ${cy - R + 14}
+            ${cx - 5.5},   ${cy + 3}
+            ${cx},         ${cy + 1}
+            ${cx + 5.5},   ${cy + 3}
+          `}
+          fill="#38bdf8"
+        />
+        {/* South half — dim */}
+        <polygon
+          points={`
+            ${cx},         ${cy + R - 14}
+            ${cx - 5.5},   ${cy - 3}
+            ${cx},         ${cy - 1}
+            ${cx + 5.5},   ${cy - 3}
+          `}
+          fill="#1e3a6b"
+        />
+        {/* Centre pivot */}
+        <circle cx={cx} cy={cy} r={3} fill="#070d1a" stroke="#2d5a8a" strokeWidth={1.2}/>
+      </g>
+    </svg>
+  );
+}
+
+/**
+ * Tiny north arrow shown as a canvas overlay.
+ * size=36, arrow points in the direction of north relative to the floor plan.
+ * North SVG direction: (-sin(r), -cos(r)) where r is in radians.
+ */
+function NorthOverlay({ rotation }) {
+  const S = 36, cx = S / 2, cy = S / 2, len = 13;
+  const r   = rotation * Math.PI / 180;
+  const nx  = cx - Math.sin(r) * len;
+  const ny  = cy - Math.cos(r) * len;
+  // Perpendicular unit for arrowhead
+  const px  = -Math.cos(r), py = Math.sin(r);
+  const hw  = 3.5, hl = 6;
+  const tip = { x: nx, y: ny };
+  const b   = { x: cx - Math.sin(r) * (len - hl), y: cy - Math.cos(r) * (len - hl) };
+  return (
+    <svg width={S} height={S} style={{ display: "block" }}>
+      <circle cx={cx} cy={cy} r={S / 2 - 1} fill="#070d1a99" stroke="#1e3a6b" strokeWidth={1}/>
+      {/* Shaft */}
+      <line x1={cx} y1={cy} x2={tip.x} y2={tip.y} stroke="#38bdf8" strokeWidth={1.2}/>
+      {/* Arrowhead */}
+      <polygon
+        points={`${tip.x},${tip.y} ${b.x + px * hw},${b.y + py * hw} ${b.x - px * hw},${b.y - py * hw}`}
+        fill="#38bdf8"
+      />
+      {/* N label */}
+      <text x={tip.x} y={tip.y - 4}
+        textAnchor="middle" dominantBaseline="auto"
+        fontSize={6} fill="#38bdf8" fontWeight="bold"
+        style={{ userSelect: "none", fontFamily: "monospace" }}
+      >N</text>
+    </svg>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function FloorPlanUI() {
   const svgRef = useRef(null);
@@ -199,10 +329,19 @@ export default function FloorPlanUI() {
     try { const s = localStorage.getItem("floorplan_uvalues"); return s ? JSON.parse(s) : { ...DEFAULT_U_VALUES }; }
     catch { return { ...DEFAULT_U_VALUES }; }
   });
+  const [buildingRotation, setBuildingRotation] = useState(() => {
+    try { const s = localStorage.getItem("floorplan_rotation"); return s ? JSON.parse(s) : 0; }
+    catch { return 0; }
+  });
 
   const ceilingH = ceilingHeights[activeStorey];
-  const adjustCeiling = (delta) =>
-    setCeilingHeights(h => ({ ...h, [activeStorey]: Math.round(Math.max(1.8, Math.min(6.0, h[activeStorey]+delta))*10)/10 }));
+  const adjustCeiling = (delta) => {
+    setCeilingHeights(h => {
+      const newH = Math.round(Math.max(1.8, Math.min(6.0, h[activeStorey]+delta))*10)/10;
+      recorder.record("ceiling_adjust", { storey: activeStorey, height: newH });
+      return { ...h, [activeStorey]: newH };
+    });
+  };
 
   const rooms = roomsByStorey[activeStorey] || [];
   const setRooms = useCallback((updater) => {
@@ -216,24 +355,54 @@ export default function FloorPlanUI() {
   const [savedAt, setSavedAt] = useState(null);
   useEffect(() => { try { localStorage.setItem("floorplan_rooms", JSON.stringify(roomsByStorey)); setSavedAt(new Date()); } catch {} }, [roomsByStorey]);
   useEffect(() => { try { localStorage.setItem("floorplan_ceilings", JSON.stringify(ceilingHeights)); } catch {} }, [ceilingHeights]);
-  useEffect(() => { try { localStorage.setItem("floorplan_uvalues", JSON.stringify(globalU)); } catch {} }, [globalU]);
+  useEffect(() => { try { localStorage.setItem("floorplan_uvalues",   JSON.stringify(globalU));           } catch {} }, [globalU]);
+  useEffect(() => { try { localStorage.setItem("floorplan_rotation", JSON.stringify(buildingRotation));   } catch {} }, [buildingRotation]);
 
   // Persist BuildingModel so other views (3D, energy model) can consume it.
   useEffect(() => {
     try {
-      const model = buildingModelFromState({ roomsByStorey, ceilingHeights, globalU });
+      const model = buildingModelFromState({
+        roomsByStorey, ceilingHeights, globalU,
+        site: { buildingRotation },
+      });
       localStorage.setItem("building_model", JSON.stringify(model));
     } catch {}
-  }, [roomsByStorey, ceilingHeights, globalU]);
+  }, [roomsByStorey, ceilingHeights, globalU, buildingRotation]);
 
   const clearStorage = () => {
     if (!window.confirm("Clear all floors and start over?")) return;
-    try { ["floorplan_rooms","floorplan_ceilings","floorplan_uvalues"].forEach(k => localStorage.removeItem(k)); } catch {}
+    recorder.record("clear_all");
+    try { ["floorplan_rooms","floorplan_ceilings","floorplan_uvalues","floorplan_rotation"].forEach(k => localStorage.removeItem(k)); } catch {}
     setRoomsByStorey({ 0:[], 1:[], 2:[] });
     setCeilingHeights({ 0:3.0, 1:2.7, 2:2.5 });
     setGlobalU({ ...DEFAULT_U_VALUES });
+    setBuildingRotation(0);
     setSelectedId(null); setSelectedOpening(null); setDraft([]);
   };
+
+  // ── Session recording ──
+  // Keep refs so the state getter always reads the latest values without re-registering.
+  const _recRooms    = useRef(roomsByStorey);
+  const _recCeilings = useRef(ceilingHeights);
+  const _recGlobalU  = useRef(globalU);
+  const _recRotation = useRef(buildingRotation);
+  useEffect(() => { _recRooms.current    = roomsByStorey;    }, [roomsByStorey]);
+  useEffect(() => { _recCeilings.current = ceilingHeights;   }, [ceilingHeights]);
+  useEffect(() => { _recGlobalU.current  = globalU;          }, [globalU]);
+  useEffect(() => { _recRotation.current = buildingRotation; }, [buildingRotation]);
+
+  useEffect(() => {
+    recorder.setStateGetter(() => ({
+      roomsByStorey:    _recRooms.current,
+      ceilingHeights:   _recCeilings.current,
+      globalU:          _recGlobalU.current,
+      buildingRotation: _recRotation.current,
+    }));
+    recorder.start();
+  }, []);
+
+  // ── Replay ──
+  const [showReplay, setShowReplay] = useState(false);
 
   // ── Tool & drawing ──
   const [tool,      setTool]      = useState("draw");
@@ -292,20 +461,26 @@ export default function FloorPlanUI() {
 
   // ── U-value helpers ──
   const effU = (override, defaultVal) => (override !== null && override !== undefined) ? override : defaultVal;
-  const updateRoomU = (roomId, key, value) =>
+  const updateRoomU = (roomId, key, value) => {
+    recorder.record("uvalue_room", { roomId, key, value });
     setRooms(rs => rs.map(r => r.id === roomId ? { ...r, [key]: value } : r));
-  const updateWallU = (roomId, wallIdx, value) =>
+  };
+  const updateWallU = (roomId, wallIdx, value) => {
+    recorder.record("uvalue_wall", { roomId, wallIdx, value });
     setRooms(rs => rs.map(r => {
       if (r.id !== roomId) return r;
       const wallUs = { ...r.wallUs };
       if (value === null) delete wallUs[wallIdx]; else wallUs[wallIdx] = value;
       return { ...r, wallUs };
     }));
-  const updateOpeningU = (roomId, openingId, value) =>
+  };
+  const updateOpeningU = (roomId, openingId, value) => {
+    recorder.record("uvalue_opening", { roomId, openingId, value });
     setRooms(rs => rs.map(r => {
       if (r.id !== roomId) return r;
       return { ...r, openings: r.openings.map(o => o.id === openingId ? { ...o, uValue: value } : o) };
     }));
+  };
 
   // ── New room/opening factories ──
   const newRoom = (draft, rooms, pal) => ({
@@ -339,7 +514,13 @@ export default function FloorPlanUI() {
       e.preventDefault();
     }
   }, []);
-  const onMouseUp = useCallback(() => { panState.current.active = false; dragVertex.current = null; }, []);
+  const onMouseUp = useCallback(() => {
+    panState.current.active = false;
+    if (dragVertex.current) {
+      recorder.record("vertex_drag_end", { roomId: dragVertex.current.roomId, vIdx: dragVertex.current.vIdx });
+      dragVertex.current = null;
+    }
+  }, []);
 
   const onCanvasClick = useCallback((e) => {
     if (panState.current.active) return;
@@ -347,7 +528,10 @@ export default function FloorPlanUI() {
 
     if (tool === "window" || tool === "door") {
       const wh = findWallHover(rawPt, rooms, OPENING_DEFAULTS[tool].width);
-      if (wh) setRooms(rs => rs.map(r => r.id === wh.roomId ? { ...r, openings: [...r.openings, newOpening(tool, wh)] } : r));
+      if (wh) {
+        setRooms(rs => rs.map(r => r.id === wh.roomId ? { ...r, openings: [...r.openings, newOpening(tool, wh)] } : r));
+        recorder.record("opening_add", { type: tool, roomId: wh.roomId, wallIdx: wh.wallIdx, offset: wh.offset });
+      }
       return;
     }
     if (tool === "select") {
@@ -356,19 +540,33 @@ export default function FloorPlanUI() {
           const ptA = room.points[o.wallIdx], ptB = room.points[(o.wallIdx+1)%room.points.length];
           const wLen = dist(ptA, ptB), dir = { x:(ptB.x-ptA.x)/wLen, y:(ptB.y-ptA.y)/wLen };
           const mid = { x:ptA.x+dir.x*(o.offset+o.width/2), y:ptA.y+dir.y*(o.offset+o.width/2) };
-          if (dist(rawPt, mid) < Math.max(0.25, o.width/2)) { setSelectedOpening({ roomId:room.id, openingId:o.id }); setSelectedId(null); return; }
+          if (dist(rawPt, mid) < Math.max(0.25, o.width/2)) {
+            setSelectedOpening({ roomId:room.id, openingId:o.id }); setSelectedId(null);
+            recorder.record("select_opening", { roomId: room.id, openingId: o.id });
+            return;
+          }
         }
       }
       const hit = [...rooms].reverse().find(r => pointInPoly(rawPt, r.points));
-      if (hit) { setSelectedId(hit.id); setSelectedOpening(null); } else { setSelectedId(null); setSelectedOpening(null); }
+      if (hit) {
+        setSelectedId(hit.id); setSelectedOpening(null);
+        recorder.record("select_room", { roomId: hit.id });
+      } else {
+        setSelectedId(null); setSelectedOpening(null);
+        recorder.record("select_clear");
+      }
       return;
     }
     if (tool !== "draw") return;
     if (draft.length >= 3 && dist(pt, draft[0]) < closeThreshold) {
       const pal = PALETTE[rooms.length % PALETTE.length];
       setRooms(rs => [...rs, newRoom(draft, rooms, pal)]);
+      recorder.record("room_close", { points: [...draft] });
       setDraft([]);
-    } else { setDraft(d => [...d, pt]); }
+    } else {
+      recorder.record("draw_point", { pt });
+      setDraft(d => [...d, pt]);
+    }
   }, [tool, snapPt, svgPt, draft, closeThreshold, rooms, setRooms, findWallHover]);
 
   const onVertexMouseDown = useCallback((e, roomId, vIdx) => {
@@ -386,21 +584,27 @@ export default function FloorPlanUI() {
   useEffect(() => {
     const fn = (e) => {
       if (e.target.tagName === "INPUT") return;
-      if (e.key === "Escape") { setDraft([]); setSelectedId(null); setSelectedOpening(null); }
-      if (e.key === "d") setTool("draw");
-      if (e.key === "s") { setTool("select"); setDraft([]); }
-      if (e.key === "w") setTool("window");
-      if (e.key === "r") setTool("door");
+      if (e.key === "Escape") { setDraft([]); setSelectedId(null); setSelectedOpening(null); recorder.record("key_escape"); }
+      if (e.key === "d") { setTool("draw"); recorder.record("tool_change", { tool: "draw" }); }
+      if (e.key === "s") { setTool("select"); setDraft([]); recorder.record("tool_change", { tool: "select" }); }
+      if (e.key === "w") { setTool("window"); recorder.record("tool_change", { tool: "window" }); }
+      if (e.key === "r") { setTool("door"); recorder.record("tool_change", { tool: "door" }); }
       if (e.key === "Enter" && tool === "draw" && draft.length >= 3) {
         const pal = PALETTE[rooms.length % PALETTE.length];
-        setRooms(rs => [...rs, newRoom(draft, rooms, pal)]); setDraft([]);
+        setRooms(rs => [...rs, newRoom(draft, rooms, pal)]);
+        recorder.record("room_close", { points: [...draft], via: "enter" });
+        setDraft([]);
       }
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedOpening) {
           const { roomId, openingId } = selectedOpening;
           setRooms(rs => rs.map(r => r.id === roomId ? { ...r, openings: r.openings.filter(o => o.id !== openingId) } : r));
+          recorder.record("opening_delete", { roomId, openingId });
           setSelectedOpening(null);
-        } else if (selectedId) { setRooms(rs => rs.filter(r => r.id !== selectedId)); setSelectedId(null); }
+        } else if (selectedId) {
+          recorder.record("room_delete", { roomId: selectedId });
+          setRooms(rs => rs.filter(r => r.id !== selectedId)); setSelectedId(null);
+        }
       }
     };
     window.addEventListener("keydown", fn);
@@ -575,7 +779,7 @@ export default function FloorPlanUI() {
           <div style={{ marginBottom:12 }}>
             <div style={{ color:"#2d5a8a",fontSize:9,marginBottom:4,letterSpacing:"0.1em" }}>ROOM NAME</div>
             <input value={selectedRoom.name}
-              onChange={e => setRooms(rs=>rs.map(r=>r.id===selectedId?{...r,name:e.target.value}:r))}
+              onChange={e => { setRooms(rs=>rs.map(r=>r.id===selectedId?{...r,name:e.target.value}:r)); recorder.record("room_rename", { roomId: selectedId, name: e.target.value }); }}
               style={{ background:"#0a1628",border:"1px solid #1e3a6b",color:"#c8d8f0",padding:"5px 8px",borderRadius:3,width:"100%",fontFamily:"monospace",fontSize:11,outline:"none",boxSizing:"border-box" }}/>
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom:4 }}>
@@ -655,7 +859,7 @@ export default function FloorPlanUI() {
             </Section>
           )}
 
-          <button onClick={()=>{ setRooms(rs=>rs.filter(r=>r.id!==selectedId)); setSelectedId(null); }}
+          <button onClick={()=>{ recorder.record("room_delete", { roomId: selectedId }); setRooms(rs=>rs.filter(r=>r.id!==selectedId)); setSelectedId(null); }}
             style={{ width:"100%",padding:"6px",background:"#200a0a",border:"1px solid #7f1d1d",color:"#f87171",borderRadius:3,cursor:"pointer",fontSize:11,fontFamily:"monospace",marginTop:14 }}>
             DELETE ROOM
           </button>
@@ -707,6 +911,11 @@ export default function FloorPlanUI() {
   };
 
   // ─── Render ───────────────────────────────────────────────────────────────
+  const replaySetters = {
+    setRoomsByStorey, setCeilingHeights, setGlobalU, setBuildingRotation,
+    setSelectedId, setSelectedOpening, setDraft, setActiveStorey,
+  };
+
   return (
     <div style={{ display:"flex",flexDirection:"column",height:"100%",flex:1,minHeight:0,background:"#05090f",color:"#c8d8f0",fontFamily:"monospace",overflow:"hidden" }}>
 
@@ -716,7 +925,7 @@ export default function FloorPlanUI() {
         <div style={{ width:1,height:20,background:"#132040" }}/>
         {tools.map(({ id, label, key }) => {
           const tc=toolColors[id], isActive=tool===id;
-          return <button key={id} onClick={()=>{ setTool(id); if(id!=="draw")setDraft([]); }} style={{ padding:"5px 10px",background:isActive?tc.active:"transparent",color:isActive?tc.text:"#2d5a8a",border:`1px solid ${isActive?tc.border:"#132040"}`,borderRadius:5,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.07em",transition:"all 0.15s",display:"flex",alignItems:"center",gap:5 }}>{label}<span style={{opacity:0.4,fontSize:8}}>[{key}]</span></button>;
+          return <button key={id} onClick={()=>{ recorder.record("tool_change", { tool: id }); setTool(id); if(id!=="draw")setDraft([]); }} style={{ padding:"5px 10px",background:isActive?tc.active:"transparent",color:isActive?tc.text:"#2d5a8a",border:`1px solid ${isActive?tc.border:"#132040"}`,borderRadius:5,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.07em",transition:"all 0.15s",display:"flex",alignItems:"center",gap:5 }}>{label}<span style={{opacity:0.4,fontSize:8}}>[{key}]</span></button>;
         })}
         <div style={{ width:1,height:20,background:"#132040" }}/>
         <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,cursor:"pointer",color:"#2d5a8a",userSelect:"none" }}>
@@ -729,12 +938,19 @@ export default function FloorPlanUI() {
         <span style={{ fontSize:9,color:"#1e3a6b" }}>{(zoom*100).toFixed(0)}%</span>
         {savedAt&&<span style={{ fontSize:9,color:"#1e4a30",letterSpacing:"0.08em" }}>● SAVED {savedAt.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
         <button onClick={clearStorage} style={{ marginLeft:4,padding:"3px 8px",background:"transparent",border:"1px solid #1e3a6b",color:"#1e3a6b",borderRadius:4,cursor:"pointer",fontSize:9,fontFamily:"monospace" }}>NEW</button>
+        <button onClick={()=>recorder.download()} title="Download session recording for bug reports" style={{ marginLeft:4,padding:"3px 8px",background:"transparent",border:"1px solid #1e4a30",color:"#1e7a40",borderRadius:4,cursor:"pointer",fontSize:9,fontFamily:"monospace" }}>REC ↓</button>
+        <button onClick={()=>setShowReplay(true)} title="Open replay panel" style={{ marginLeft:4,padding:"3px 8px",background:showReplay?"#0a2818":"transparent",border:`1px solid ${showReplay?"#1e7a40":"#1e4a30"}`,color:"#1e7a40",borderRadius:4,cursor:"pointer",fontSize:9,fontFamily:"monospace" }}>REPLAY</button>
       </div>
 
       <div style={{ display:"flex",flex:1,overflow:"hidden" }}>
 
-        {/* ── Canvas ── */}
-        <svg ref={svgRef} style={{ flex:1,display:"block",cursor:(tool==="draw"||tool==="window"||tool==="door")?"crosshair":"default" }}
+        {/* ── Canvas wrapper (position:relative so overlay can sit on top) ── */}
+        <div style={{ flex:1, position:"relative", minWidth:0 }}>
+        {/* North overlay — top-right corner of canvas */}
+        <div style={{ position:"absolute", top:10, right:10, zIndex:10, pointerEvents:"none" }}>
+          <NorthOverlay rotation={buildingRotation} />
+        </div>
+        <svg ref={svgRef} style={{ width:"100%",height:"100%",display:"block",cursor:(tool==="draw"||tool==="window"||tool==="door")?"crosshair":"default" }}
           onMouseMove={onMouseMove} onMouseDown={onMouseDown} onMouseUp={onMouseUp} onClick={onCanvasClick}>
           <g transform={`translate(${pan.x},${pan.y}) scale(${zoom*PPM})`}>
             {renderGrid()}
@@ -799,11 +1015,47 @@ export default function FloorPlanUI() {
             {(tool==="window"||tool==="door")&&!wallHover&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill={tool==="window"?"#38bdf8":"#a78bfa"} opacity={0.5}/>}
           </g>
         </svg>
+        </div>{/* end canvas wrapper */}
 
         {/* ── Right panel ── */}
         <div style={{ width:240,background:"#070d1a",borderLeft:"1px solid #132040",padding:14,overflowY:"auto",flexShrink:0,fontSize:11 }}>
           <div style={{ color:"#2d5a8a",letterSpacing:"0.18em",fontSize:9,marginBottom:14 }}>PROPERTIES</div>
           {renderPanelContent()}
+
+          {/* ── Orientation / north direction ── */}
+          <div style={{ marginTop: 16 }}>
+            <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.15em",
+              borderBottom: "1px solid #132040", paddingBottom: 5, marginBottom: 12 }}>
+              ORIENTATION
+            </div>
+            <CompassWidget rotation={buildingRotation} />
+            <div style={{ marginTop: 10 }}>
+              <input
+                type="range" min={0} max={359} step={1}
+                value={buildingRotation}
+                onChange={e => { const v = Number(e.target.value); setBuildingRotation(v); recorder.record("rotation_change", { rotation: v }); }}
+                style={{ width: "100%", accentColor: "#38bdf8", cursor: "pointer" }}
+              />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 4 }}>
+                <span style={{ color: "#4a7fa5", fontSize: 9 }}>
+                  {String(buildingRotation).padStart(3, "0")}°
+                </span>
+                <span style={{ color: "#7dd3fc", fontSize: 11, fontFamily: "monospace" }}>
+                  {bearingLabel(buildingRotation)}
+                </span>
+                <button
+                  onClick={() => setBuildingRotation(0)}
+                  title="Reset to north-up"
+                  style={{ background: "none", border: "none", color: "#2d5a8a",
+                    cursor: "pointer", fontSize: 10, padding: "0 2px" }}
+                >↩</button>
+              </div>
+              <div style={{ color: "#1a3050", fontSize: 8, marginTop: 5, lineHeight: 1.6 }}>
+                Angle from north (↑) to the floor plan's +X axis (→), clockwise.
+                The needle shows where north is on your drawing.
+              </div>
+            </div>
+          </div>
 
           {/* ── Global U-value defaults (always visible at bottom) ── */}
           <Section label="GLOBAL U-VALUE DEFAULTS" open={secDef} onToggle={()=>setSecDef(v=>!v)} accent="#4a7fa5">
@@ -836,7 +1088,7 @@ export default function FloorPlanUI() {
       <div style={{ display:"flex",alignItems:"center",background:"#070d1a",borderTop:"1px solid #132040",padding:"0 12px",height:44,flexShrink:0,gap:4 }}>
         <span style={{ color:"#1e3a6b",fontSize:9,marginRight:4,letterSpacing:"0.15em",flexShrink:0 }}>STOREY</span>
         {STOREY_LABELS.map((label,i)=>{ const isActive=activeStorey===i;
-          return <button key={i} onClick={()=>{ setActiveStorey(i); setSelectedId(null); setSelectedOpening(null); setDraft([]); }} style={{ padding:"4px 10px",height:32,background:isActive?"#1e4a7a":"#0a1628",color:isActive?"#7dd3fc":"#2d5a8a",border:`1px solid ${isActive?"#2563eb":"#132040"}`,borderRadius:6,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.06em",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",lineHeight:1.2,transition:"all 0.15s",flexShrink:0 }}>
+          return <button key={i} onClick={()=>{ recorder.record("storey_change", { storey: i }); setActiveStorey(i); setSelectedId(null); setSelectedOpening(null); setDraft([]); }} style={{ padding:"4px 10px",height:32,background:isActive?"#1e4a7a":"#0a1628",color:isActive?"#7dd3fc":"#2d5a8a",border:`1px solid ${isActive?"#2563eb":"#132040"}`,borderRadius:6,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.06em",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",lineHeight:1.2,transition:"all 0.15s",flexShrink:0 }}>
             <span>{label.toUpperCase()}</span>
             <span style={{ fontSize:7,opacity:0.6,color:isActive?"#38bdf8":"#1e3a6b" }}>{ceilingHeights[i].toFixed(1)}m</span>
           </button>; })}
@@ -847,6 +1099,13 @@ export default function FloorPlanUI() {
           <button onClick={()=>adjustCeiling(+0.1)} style={{ width:26,height:26,background:"#070d1a",border:"1px solid #1e3a6b",color:"#4a7fa5",borderRadius:5,cursor:"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"monospace" }}>+</button>
         </div>
       </div>
+
+      {showReplay && (
+        <ReplayPanel
+          onClose={() => setShowReplay(false)}
+          setters={replaySetters}
+        />
+      )}
     </div>
   );
 }
