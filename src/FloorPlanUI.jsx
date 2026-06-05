@@ -200,46 +200,47 @@ function CompassWidget({ rotation }) {
 
   return (
     <svg width={S} height={S} style={{ display: "block", margin: "0 auto" }}>
-      {/* Outer ring */}
+      {/* Outer ring — fixed, never rotates */}
       <circle cx={cx} cy={cy} r={R} fill="#0a1628" stroke="#1e3a6b" strokeWidth={1.5}/>
 
-      {/* Tick marks */}
-      {ticks.map(deg => {
-        const rad     = toRad(deg - 90);          // SVG: 0° = right; -90° offset → 0° = up
-        const isMaj   = deg % 90 === 0;
-        const isMinor = deg % 45 === 0 && !isMaj;
-        const r1 = R - 1;
-        const r2 = R - (isMaj ? 9 : isMinor ? 6 : 4);
-        return (
-          <line key={deg}
-            x1={cx + r1 * Math.cos(rad)} y1={cy + r1 * Math.sin(rad)}
-            x2={cx + r2 * Math.cos(rad)} y2={cy + r2 * Math.sin(rad)}
-            stroke={isMaj ? "#2d5a8a" : "#1a3050"}
-            strokeWidth={isMaj ? 1.5 : 1}
-          />
-        );
-      })}
+      {/* Everything inside rotates together so north always points up on screen.
+          rotation = degrees CW from north to +X axis; rotating the rose by +rotation
+          keeps north fixed at screen-top while the rest of the rose spins. */}
+      <g transform={`rotate(${rotation}, ${cx}, ${cy})`}>
 
-      {/* Cardinal labels — fixed */}
-      {[
-        { l: "N", dx:  0,       dy: -(R-12), color: "#38bdf8", fw: "bold",   fs: 10 },
-        { l: "S", dx:  0,       dy:   R-12,  color: "#2d5a8a", fw: "normal", fs: 8  },
-        { l: "E", dx:  R-12,    dy:  0,      color: "#2d5a8a", fw: "normal", fs: 8  },
-        { l: "W", dx: -(R-12),  dy:  0,      color: "#2d5a8a", fw: "normal", fs: 8  },
-      ].map(({ l, dx, dy, color, fw, fs }) => (
-        <text key={l}
-          x={cx + dx} y={cy + dy}
-          textAnchor="middle" dominantBaseline="middle"
-          fontSize={fs} fill={color} fontWeight={fw}
-          style={{ userSelect: "none", fontFamily: "monospace" }}
-        >{l}</text>
-      ))}
+        {/* Tick marks */}
+        {ticks.map(deg => {
+          const rad     = toRad(deg - 90);
+          const isMaj   = deg % 90 === 0;
+          const isMinor = deg % 45 === 0 && !isMaj;
+          const r1 = R - 1;
+          const r2 = R - (isMaj ? 9 : isMinor ? 6 : 4);
+          return (
+            <line key={deg}
+              x1={cx + r1 * Math.cos(rad)} y1={cy + r1 * Math.sin(rad)}
+              x2={cx + r2 * Math.cos(rad)} y2={cy + r2 * Math.sin(rad)}
+              stroke={isMaj ? "#2d5a8a" : "#1a3050"}
+              strokeWidth={isMaj ? 1.5 : 1}
+            />
+          );
+        })}
 
-      {/* Needle — rotates so its tip always points toward north on the floor plan.
-          SVG rotate(-buildingRotation) because:
-            rotation=0  → needle up (north is up)   ✓
-            rotation=90 → needle left (north is left when +X=east) ✓  */}
-      <g transform={`rotate(${-rotation}, ${cx}, ${cy})`}>
+        {/* Cardinal labels */}
+        {[
+          { l: "N", dx:  0,       dy: -(R-12), color: "#38bdf8", fw: "bold",   fs: 10 },
+          { l: "S", dx:  0,       dy:   R-12,  color: "#2d5a8a", fw: "normal", fs: 8  },
+          { l: "E", dx:  R-12,    dy:  0,      color: "#2d5a8a", fw: "normal", fs: 8  },
+          { l: "W", dx: -(R-12),  dy:  0,      color: "#2d5a8a", fw: "normal", fs: 8  },
+        ].map(({ l, dx, dy, color, fw, fs }) => (
+          <text key={l}
+            x={cx + dx} y={cy + dy}
+            textAnchor="middle" dominantBaseline="middle"
+            fontSize={fs} fill={color} fontWeight={fw}
+            style={{ userSelect: "none", fontFamily: "monospace" }}
+          >{l}</text>
+        ))}
+
+        {/* Needle */}
         {/* North half — bright */}
         <polygon
           points={`
@@ -262,6 +263,7 @@ function CompassWidget({ rotation }) {
         />
         {/* Centre pivot */}
         <circle cx={cx} cy={cy} r={3} fill="#070d1a" stroke="#2d5a8a" strokeWidth={1.2}/>
+
       </g>
     </svg>
   );
@@ -274,7 +276,7 @@ function CompassWidget({ rotation }) {
  */
 function NorthOverlay({ rotation }) {
   const S = 36, cx = S / 2, cy = S / 2, len = 13;
-  const r   = rotation * Math.PI / 180;
+  const r   = -rotation * Math.PI / 180;
   const nx  = cx - Math.sin(r) * len;
   const ny  = cy - Math.cos(r) * len;
   // Perpendicular unit for arrowhead
