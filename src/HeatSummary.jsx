@@ -301,8 +301,9 @@ export default function HeatSummary() {
       .filter(o => o.type === "window")
       .forEach(o => {
         const or = o.orientation;
-        if (!groups[or]) groups[or] = { orientation: or, bearing: ORIENTATION_BEARING[or] ?? 0, effectiveArea: 0 };
+        if (!groups[or]) groups[or] = { orientation: or, bearing: ORIENTATION_BEARING[or] ?? 0, effectiveArea: 0, area: 0 };
         groups[or].effectiveArea += o.area * o.solarHeatGainCoeff;
+        groups[or].area          += o.area;
       });
     return Object.values(groups);
   }, [pb]);
@@ -659,13 +660,20 @@ export default function HeatSummary() {
                       .sort((a, b) => b[1] - a[1])
                       .map(([or, kwh]) => {
                         const width = solarGains.annualKwh > 0 ? (kwh / solarGains.annualKwh) * 100 : 0;
+                        const grp   = windowGroups.find(g => g.orientation === or);
                         return (
                           <div key={or} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                             <div style={{ width: 28, color: "#fbbf24", fontSize: 10, fontFamily: "monospace" }}>{or}</div>
                             <div style={{ flex: 1, height: 6, background: "#0a1628", borderRadius: 3, overflow: "hidden" }}>
                               <div style={{ width: `${width}%`, height: "100%", background: "#f59e0b", borderRadius: 3 }} />
                             </div>
-                            <div style={{ width: 72, textAlign: "right", color: "#c8d8f0", fontSize: 11, fontFamily: "monospace" }}>
+                            {grp && (
+                              <div style={{ width: 52, textAlign: "right", color: "#4a7fa5", fontSize: 9, fontFamily: "monospace" }}>
+                                {grp.area.toFixed(2)}
+                                <span style={{ fontSize: 7, color: "#2d5a8a", marginLeft: 2 }}>m²</span>
+                              </div>
+                            )}
+                            <div style={{ width: 64, textAlign: "right", color: "#c8d8f0", fontSize: 11, fontFamily: "monospace" }}>
                               {kwh.toFixed(0)}
                               <span style={{ fontSize: 8, color: "#78350f", marginLeft: 3 }}>kWh</span>
                             </div>

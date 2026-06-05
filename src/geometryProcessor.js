@@ -59,9 +59,11 @@ export function wallOutwardBearing(ptA, ptB, centroid, buildingRotation = 0) {
   const normal = (n1.x * toCentroid.x + n1.y * toCentroid.y) < 0 ? n1 : n2;
 
   // Convert normal vector to bearing.
-  // In SVG coords: north = (0, -1), so bearing = atan2(nx, -ny)
+  // In SVG coords: north = (0, -1), so bearing = atan2(nx, -ny).
+  // Subtract buildingRotation: when rotation=90 (north=right/+X), a normal of (1,0)
+  // gives localBearing=90°; subtracting 90 gives 0° (north) as required.
   const localBearing = Math.atan2(normal.x, -normal.y) * (180 / Math.PI);
-  return ((localBearing + buildingRotation) % 360 + 360) % 360;
+  return ((localBearing - buildingRotation) % 360 + 360) % 360;
 }
 
 /** Bin a bearing into one of 8 compass directions. */
