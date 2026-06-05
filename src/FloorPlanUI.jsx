@@ -1053,8 +1053,8 @@ export default function FloorPlanUI() {
                 >↩</button>
               </div>
               <div style={{ color: "#1a3050", fontSize: 8, marginTop: 5, lineHeight: 1.6 }}>
-                Angle from north (↑) to the floor plan's +X axis (→), clockwise.
-                The needle shows where north is on your drawing.
+                Clockwise angle from the drawing's up direction (↑) to true north.
+                The compass rotates so N always points toward true north on your drawing.
               </div>
             </div>
           </div>
