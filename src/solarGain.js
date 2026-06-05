@@ -60,9 +60,11 @@ export function solarPosition(latDeg, lonDeg, timezone, month, day, hourEPW) {
   const alt = Math.asin(Math.max(-1, Math.min(1, sinAlt)));
   if (alt <= 0) return { altitude: 0, azimuth: 180, aboveHorizon: false };
 
-  // Azimuth: atan2 gives angle from south (positive = west); convert to from-north CW
+  // Azimuth from south (positive west), using Duffie & Beckman formula:
+  //   cos(γs) = [sin(α)·sin(φ) − sin(δ)] / [cos(α)·cos(φ)]
+  // Note the sign: sin(alt)*sin(lat) − sin(dec), NOT the reverse.
   const cosAlt = Math.cos(alt);
-  const cosAz  = (Math.sin(dec) - Math.sin(alt)*Math.sin(lat)) / (cosAlt * Math.cos(lat));
+  const cosAz  = (Math.sin(alt)*Math.sin(lat) - Math.sin(dec)) / (cosAlt * Math.cos(lat));
   const sinAz  = Math.cos(dec) * Math.sin(h) / cosAlt;
   const gammaS = Math.atan2(sinAz, cosAz) * R2D; // from south, + = west
   const azNorth = ((180 + gammaS) % 360 + 360) % 360;
