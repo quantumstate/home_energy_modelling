@@ -313,6 +313,11 @@ export default function HeatSummary() {
     return computeMonthlySolarGains(epwData.hourly, epwData.location, windowGroups);
   }, [epwData, windowGroups]);
 
+  // ── Internal gains inputs ───────────────────────────────────────────────────
+  const [electricityKwhPerDay, setElectricityKwhPerDay] = useState(8);
+  const [numPeople,            setNumPeople]            = useState(2);
+  const [hoursAtHome,          setHoursAtHome]          = useState(12);
+
   // ── Building model ──────────────────────────────────────────────────────────
   if (!pb || pb.rooms.length === 0) {
     return (
@@ -330,6 +335,10 @@ export default function HeatSummary() {
 
   // Q (kWh) = HLC (W/K) × HDD (K·day) × 24 h/day ÷ 1000
   const conductiveLoss = (hlc * hdd * 24) / 1000;
+
+  // Internal gains
+  const electricityGainKwh = electricityKwhPerDay * 365;
+  const peopleGainKwh      = (numPeople * 100 * hoursAtHome * 365) / 1000;
 
   // ── Per-element HLC breakdown ───────────────────────────────────────────────
   const heatedRooms = pb.rooms.filter(r => r.isHeated);
@@ -704,6 +713,113 @@ export default function HeatSummary() {
               </div>
             </Card>
           ) : null}
+
+          {/* ── Internal gains ── */}
+          <Card accent="#134e2a">
+            <SectionHeader label="INTERNAL GAINS" />
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+              <NumInput
+                label="Electricity consumption"
+                value={electricityKwhPerDay}
+                onChange={setElectricityKwhPerDay}
+                min={0} max={100} step={0.5}
+                unit="kWh/day"
+              />
+              <div style={{ color: "#1e3a6b", fontSize: 8, marginLeft: 0, lineHeight: 1.6 }}>
+                All electricity use assumed to become heat (lighting, appliances, cooking, etc.)
+              </div>
+
+              <div style={{ borderTop: "1px solid #132040", paddingTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                <NumInput
+                  label="Number of people"
+                  value={numPeople}
+                  onChange={setNumPeople}
+                  min={0} max={20} step={1}
+                  unit="people"
+                />
+                <NumInput
+                  label="Average hours at home per day"
+                  value={hoursAtHome}
+                  onChange={setHoursAtHome}
+                  min={0} max={24} step={0.5}
+                  unit="h/day"
+                />
+                <div style={{ color: "#1e3a6b", fontSize: 8, lineHeight: 1.6 }}>
+                  Each person generates 100 W while at home
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 12, borderTop: "1px solid #132040" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <span style={{ color: "#4a7fa5", fontSize: 10 }}>Electricity (all → heat)</span>
+                <span style={{ fontFamily: "monospace", fontSize: 12, color: "#34d399" }}>
+                  {electricityGainKwh.toFixed(0)}
+                  <span style={{ fontSize: 8, color: "#134e2a", marginLeft: 4 }}>kWh/yr</span>
+                </span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <span style={{ color: "#4a7fa5", fontSize: 10 }}>Occupants (100 W × {numPeople} people × {hoursAtHome} h/day)</span>
+                <span style={{ fontFamily: "monospace", fontSize: 12, color: "#34d399" }}>
+                  {peopleGainKwh.toFixed(0)}
+                  <span style={{ fontSize: 8, color: "#134e2a", marginLeft: 4 }}>kWh/yr</span>
+                </span>
+              </div>
+              <div style={{
+                display: "flex", justifyContent: "space-between", alignItems: "baseline",
+                paddingTop: 8, borderTop: "1px solid #132040",
+              }}>
+                <span style={{ color: "#34d399", fontSize: 11, fontWeight: 700 }}>Total internal gains</span>
+                <span style={{ fontFamily: "monospace", fontSize: 14, color: "#34d399", fontWeight: 700 }}>
+                  {(electricityGainKwh + peopleGainKwh).toFixed(0)}
+                  <span style={{ fontSize: 9, color: "#134e2a", marginLeft: 4 }}>kWh/yr</span>
+                </span>
+              </div>
+            </div>
+          </Card>
+
+          {/* ── Net heat demand ── */}
+          {(solarGains || electricityGainKwh > 0 || peopleGainKwh > 0) && (
+            <Card accent="#1e3a6b">
+              <SectionHeader label="NET HEAT DEMAND" />
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>Conductive losses</span>
+                  <span style={{ fontFamily: "monospace", fontSize: 12, color: "#c8d8f0" }}>
+                    {conductiveLoss.toFixed(0)}
+                    <span style={{ fontSize: 8, color: "#2d5a8a", marginLeft: 4 }}>kWh/yr</span>
+                  </span>
+                </div>
+                {solarGains && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                    <span style={{ color: "#4a7fa5", fontSize: 10 }}>− Solar gains</span>
+                    <span style={{ fontFamily: "monospace", fontSize: 12, color: "#fbbf24" }}>
+                      {solarGains.annualKwh.toFixed(0)}
+                      <span style={{ fontSize: 8, color: "#78350f", marginLeft: 4 }}>kWh/yr</span>
+                    </span>
+                  </div>
+                )}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>− Internal gains</span>
+                  <span style={{ fontFamily: "monospace", fontSize: 12, color: "#34d399" }}>
+                    {(electricityGainKwh + peopleGainKwh).toFixed(0)}
+                    <span style={{ fontSize: 8, color: "#134e2a", marginLeft: 4 }}>kWh/yr</span>
+                  </span>
+                </div>
+                <div style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "baseline",
+                  paddingTop: 10, borderTop: "1px solid #132040",
+                }}>
+                  <span style={{ color: "#7dd3fc", fontSize: 12, fontWeight: 700 }}>Net heating demand</span>
+                  <span style={{ fontFamily: "monospace", fontSize: 18, color: "#7dd3fc", fontWeight: 700 }}>
+                    {Math.max(0, conductiveLoss - (solarGains?.annualKwh ?? 0) - electricityGainKwh - peopleGainKwh).toFixed(0)}
+                    <span style={{ fontSize: 10, color: "#2d5a8a", marginLeft: 6 }}>kWh/yr</span>
+                  </span>
+                </div>
+              </div>
+            </Card>
+          )}
 
           {/* ── Warnings ── */}
           {summary.warnings.length > 0 && (

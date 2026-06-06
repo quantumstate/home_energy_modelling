@@ -483,6 +483,15 @@ export default function FloorPlanUI() {
       return { ...r, openings: r.openings.map(o => o.id === openingId ? { ...o, uValue: value } : o) };
     }));
   };
+  const updateOpeningSHGC = (roomId, openingId, value) => {
+    recorder.record("shgc_opening", { roomId, openingId, value });
+    setRooms(rs => rs.map(r => {
+      if (r.id !== roomId) return r;
+      return { ...r, openings: r.openings.map(o =>
+        o.id === openingId ? { ...o, glazing: { ...(o.glazing ?? {}), solarHeatGainCoeff: value } } : o
+      )};
+    }));
+  };
 
   // ── New room/opening factories ──
   const newRoom = (draft, rooms, pal) => ({
@@ -762,6 +771,28 @@ export default function FloorPlanUI() {
               Effective: <span style={{ color:"#7dd3fc" }}>{effU(selOO.uValue, globalU[defKey]).toFixed(2)}</span> W/m²K
             </div>
           </Section>
+
+          {/* SHGC — windows only */}
+          {isWindow && (() => {
+            const shgc = selOO.glazing?.solarHeatGainCoeff ?? 0.63;
+            const isDefault = selOO.glazing?.solarHeatGainCoeff == null;
+            return (
+              <div style={{ marginTop:14 }}>
+                <div style={{ color:"#f59e0b", fontSize:9, letterSpacing:"0.15em",
+                  borderBottom:"1px solid #132040", paddingBottom:5, marginBottom:8 }}>
+                  SOLAR HEAT GAIN
+                </div>
+                <URow label="SHGC (g-value)"
+                  value={isDefault ? null : shgc}
+                  defaultVal={0.63}
+                  onChange={v => updateOpeningSHGC(selOR.id, selOO.id, v === null ? null : Math.min(0.99, Math.max(0.01, v)))}
+                  accent="#f59e0b"/>
+                <div style={{ color:"#1a3050", fontSize:8, marginTop:4, lineHeight:1.6 }}>
+                  Fraction of incident solar transmitted. 0.63 = double glazing · 0.27 = low-e triple.
+                </div>
+              </div>
+            );
+          })()}
 
           <button onClick={deleteSelectedOpening} style={{ width:"100%",padding:"8px",background:"#200a0a",border:"1px solid #7f1d1d",color:"#f87171",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:"monospace",marginTop:14 }}>
             DELETE {isWindow?"WINDOW":"DOOR"}
