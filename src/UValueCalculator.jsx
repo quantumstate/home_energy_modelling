@@ -75,9 +75,9 @@ const createElement = (type = "wall", index = 1) => ({
   layers: type === "wall" ? DEFAULT_LAYERS.map(cloneLayer) : [blankLayer()],
 });
 
-function readStoredElements() {
+function readStoredElements(storageKey) {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
+    const stored = localStorage.getItem(storageKey);
     if (!stored) return null;
 
     const parsed = JSON.parse(stored);
@@ -104,8 +104,9 @@ function formatNumber(value, digits = 3) {
   return value.toFixed(digits);
 }
 
-export default function UValueCalculator() {
-  const initialElements = useMemo(() => readStoredElements() || [createElement("wall", 1)], []);
+export default function UValueCalculator({ projectId }) {
+  const storageKey = `${projectId}_${STORAGE_KEY}`;
+  const initialElements = useMemo(() => readStoredElements(storageKey) || [createElement("wall", 1)], [storageKey]);
   const [elements, setElements] = useState(initialElements);
   const [activeElementId, setActiveElementId] = useState(initialElements[0].id);
   const [newElementType, setNewElementType] = useState("wall");
@@ -125,7 +126,7 @@ export default function UValueCalculator() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(elements));
+      localStorage.setItem(storageKey, JSON.stringify(elements));
     } catch {
       // Local storage is best effort; the calculator still works without it.
     }

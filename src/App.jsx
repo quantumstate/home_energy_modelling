@@ -3,6 +3,7 @@ import FloorPlanUI from "./FloorPlanUI.jsx";
 import ThreeDView from "./ThreeDView.jsx";
 import UValueCalculator from "./UValueCalculator.jsx";
 import HeatSummary from "./HeatSummary.jsx";
+import ProjectManager from "./ProjectManager.jsx";
 
 const TABS = [
   { id: "floor-plan", label: "Floor plan" },
@@ -13,6 +14,11 @@ const TABS = [
 
 function App() {
   const [activeTab, setActiveTab] = useState("floor-plan");
+  const [currentProject, setCurrentProject] = useState(null);
+
+  if (!currentProject) {
+    return <ProjectManager onOpen={setCurrentProject} />;
+  }
 
   return (
     <div
@@ -37,6 +43,41 @@ function App() {
           flexShrink: 0,
         }}
       >
+        <button
+          type="button"
+          onClick={() => setCurrentProject(null)}
+          title="Back to projects"
+          style={{
+            height: 30,
+            padding: "0 10px",
+            background: "transparent",
+            color: "#2d5a8a",
+            border: "1px solid #132040",
+            borderRadius: 5,
+            cursor: "pointer",
+            fontFamily: "monospace",
+            fontSize: 14,
+            marginRight: 4,
+          }}
+        >
+          ‹
+        </button>
+        <span
+          style={{
+            color: "#4a7aaa",
+            fontFamily: "monospace",
+            fontSize: 11,
+            letterSpacing: "0.07em",
+            marginRight: 8,
+            maxWidth: 180,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {currentProject.name}
+        </span>
+        <div style={{ width: 1, height: 20, background: "#132040", marginRight: 8 }} />
         {TABS.map((tab) => {
           const isActive = activeTab === tab.id;
           return (
@@ -66,10 +107,10 @@ function App() {
       </nav>
 
       <main style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {activeTab === "floor-plan" && <FloorPlanUI />}
-        {activeTab === "3d-view" && <ThreeDView />}
-        {activeTab === "u-value-calculator" && <UValueCalculator />}
-        {activeTab === "heat-summary" && <HeatSummary />}
+        {activeTab === "floor-plan" && <FloorPlanUI projectId={currentProject.id} />}
+        {activeTab === "3d-view" && <ThreeDView projectId={currentProject.id} />}
+        {activeTab === "u-value-calculator" && <UValueCalculator projectId={currentProject.id} />}
+        {activeTab === "heat-summary" && <HeatSummary projectId={currentProject.id} />}
       </main>
     </div>
   );

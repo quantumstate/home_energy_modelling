@@ -1,20 +1,21 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { buildingModelFromState, processBuilding } from "./geometryProcessor.js";
 import { parseEPW, computeHDD, computeMonthlyHDD } from "./epwParser.js";
-import { computeMonthlySolarGains } from "./solarGain.js";
+import { solarPosition, verticalIncident } from "./solarGain.js";
 import kewEPWRaw from "./assets/GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw?raw";
 
 // ─── Load processed building from localStorage ────────────────────────────────
-function loadProcessedBuilding() {
+function loadProcessedBuilding(projectId) {
+  const pk = (key) => `${projectId}_${key}`;
   try {
-    const raw = localStorage.getItem("building_model");
+    const raw = localStorage.getItem(pk("building_model"));
     if (raw) return processBuilding(JSON.parse(raw));
   } catch {}
   try {
-    const roomsByStorey    = JSON.parse(localStorage.getItem("floorplan_rooms"))    || { 0: [], 1: [], 2: [] };
-    const ceilingHeights   = JSON.parse(localStorage.getItem("floorplan_ceilings")) || { 0: 3.0, 1: 2.7, 2: 2.5 };
-    const globalU          = JSON.parse(localStorage.getItem("floorplan_uvalues"))  || null;
-    const buildingRotation = JSON.parse(localStorage.getItem("floorplan_rotation")) || 0;
+    const roomsByStorey    = JSON.parse(localStorage.getItem(pk("floorplan_rooms")))    || { 0: [], 1: [], 2: [] };
+    const ceilingHeights   = JSON.parse(localStorage.getItem(pk("floorplan_ceilings"))) || { 0: 3.0, 1: 2.7, 2: 2.5 };
+    const globalU          = JSON.parse(localStorage.getItem(pk("floorplan_uvalues")))  || null;
+    const buildingRotation = JSON.parse(localStorage.getItem(pk("floorplan_rotation"))) || 0;
     return processBuilding(buildingModelFromState({ roomsByStorey, ceilingHeights, globalU, site: { buildingRotation } }));
   } catch {}
   return null;
@@ -186,6 +187,41 @@ function MonthlySolarChart({ monthlySolar }) {
   );
 }
 
+// ─── Monthly net heat demand bar chart ────────────────────────────────────────
+function MonthlyNetDemandChart({ monthlyNetDemand }) {
+  const maxVal = Math.max(...monthlyNetDemand, 1);
+  const barH   = 60;
+  return (
+    <div>
+      <div style={{
+        display: "grid", gridTemplateColumns: "repeat(12, 1fr)",
+        gap: 3, alignItems: "end", height: barH + 32,
+      }}>
+        {monthlyNetDemand.map((kwh, i) => {
+          const h = Math.max(kwh > 0 ? 2 : 0, Math.round((kwh / maxVal) * barH));
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+              <div
+                title={`${MONTH_ABBR[i]}: ${kwh.toFixed(0)} kWh`}
+                style={{
+                  width: "100%", height: h, borderRadius: "2px 2px 0 0",
+                  background: kwh > 0 ? "linear-gradient(to top, #1d4ed8, #38bdf8)" : "transparent",
+                  alignSelf: "flex-end", cursor: "default",
+                }}
+              />
+              <span style={{ color: "#2d5a8a", fontSize: 8 }}>{MONTH_ABBR[i]}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
+        <span style={{ color: "#1e3a6b", fontSize: 8 }}>0</span>
+        <span style={{ color: "#1e3a6b", fontSize: 8 }}>{maxVal.toFixed(0)} kWh</span>
+      </div>
+    </div>
+  );
+}
+
 // ─── EPW drop-zone / file picker ──────────────────────────────────────────────
 function EPWDropZone({ onLoad, error }) {
   const inputRef = useRef(null);
@@ -236,7 +272,7 @@ function EPWDropZone({ onLoad, error }) {
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
-export default function HeatSummary() {
+export default function HeatSummary({ projectId }) {
   // EPW state
   const [epwData,    setEpwData]    = useState(null);   // parsed EPW result
   const [epwName,    setEpwName]    = useState(null);   // filename
@@ -247,7 +283,7 @@ export default function HeatSummary() {
   const [hddManual,  setHddManual]  = useState(2500);
   const [hddOverride, setHddOverride] = useState(false); // user overriding EPW value
 
-  const pb = useMemo(loadProcessedBuilding, []);
+  const pb = useMemo(() => loadProcessedBuilding(projectId), [projectId]);
 
   // ── Auto-load bundled Kew EPW on first mount ────────────────────────────────
   useEffect(() => {
@@ -308,15 +344,96 @@ export default function HeatSummary() {
     return Object.values(groups);
   }, [pb]);
 
-  const solarGains = useMemo(() => {
-    if (!epwData || !windowGroups.length) return null;
-    return computeMonthlySolarGains(epwData.hourly, epwData.location, windowGroups);
-  }, [epwData, windowGroups]);
+  // ── Ventilation inputs ──────────────────────────────────────────────────────
+  const [ach50,          setAch50]          = useState(5.0);
+  const [deratingFactor, setDeratingFactor] = useState(20);
+  const [mvhrEnabled,    setMvhrEnabled]    = useState(false);
+  const [mvhrFlow,       setMvhrFlow]       = useState(30);   // l/s
+  const [mvhrEfficiency, setMvhrEfficiency] = useState(80);   // %
 
-  // ── Internal gains inputs ───────────────────────────────────────────────────
+  // Ventilation HLC computed here so it is available to the combined useMemo below.
+  // Uses pb?.summary?.totalVolume so it evaluates safely before the early-return guard.
+  const totalVolume     = pb?.summary?.totalVolume ?? 0;
+  const naturalAch      = ach50 / Math.max(1, deratingFactor);
+  const infiltrationHLC = 0.33 * totalVolume * naturalAch;
+  // MVHR: supply flow (l/s) × ρCp (1.2 W/(l/s·K)) × unrecovered fraction
+  const mvhrVentHLC     = mvhrEnabled ? (mvhrFlow * 1.2 * (1 - mvhrEfficiency / 100)) : 0;
+  const ventilationHLC  = infiltrationHLC + mvhrVentHLC;
+
+  // ── Internal gains + heating inputs ────────────────────────────────────────
   const [electricityKwhPerDay, setElectricityKwhPerDay] = useState(8);
   const [numPeople,            setNumPeople]            = useState(2);
   const [hoursAtHome,          setHoursAtHome]          = useState(12);
+  const [internalTemp,         setInternalTemp]         = useState(21);
+
+  // Single pass over hourly EPW data: accumulates solar gain and fabric heat loss together
+  // per day, then applies max(0, loss - solar - internal) per day.
+  // Temporary estimate — summer surpluses do not offset winter deficits.
+  // TODO: replace with a thermal-mass-aware simulation once thermal mass is integrated into the model.
+  const combined = useMemo(() => {
+    if (!epwData || !pb || pb.rooms.length === 0) return null;
+    const hlcVal = pb.summary.fabricHeatLossCoeff + ventilationHLC;
+    const { latitude, longitude, timezone } = epwData.location;
+    const internalGainPerDay =
+      electricityKwhPerDay + (numPeople * 100 * hoursAtHome) / 1000;
+    const hasWindows = windowGroups.length > 0;
+
+    const monthlySolarWh   = new Array(12).fill(0);
+    const monthlyNetDemand = new Array(12).fill(0);
+    const byOrientationWh = {};
+    for (const { orientation } of windowGroups) byOrientationWh[orientation] = 0;
+
+    let netDemand   = 0;
+    let dayLossKwh  = 0;
+    let daySolarKwh = 0;
+    let prevDayKey  = null;
+    let prevMonth   = null;
+
+    for (const rec of epwData.hourly) {
+      const { month, day, hour, dni, dhi, ghi, dryBulb } = rec;
+      const dayKey = month * 100 + day;
+
+      if (prevDayKey !== null && dayKey !== prevDayKey) {
+        const dayNet = Math.max(0, dayLossKwh - daySolarKwh - internalGainPerDay);
+        netDemand += dayNet;
+        monthlyNetDemand[prevMonth - 1] += dayNet;
+        dayLossKwh  = 0;
+        daySolarKwh = 0;
+      }
+      prevDayKey = dayKey;
+      prevMonth  = month;
+
+      dayLossKwh += (hlcVal * Math.max(0, internalTemp - dryBulb)) / 1000;
+
+      if (hasWindows && ((ghi ?? 0) > 0 || (dhi ?? 0) > 0 || (dni ?? 0) > 0)) {
+        const pos = solarPosition(latitude, longitude, timezone, month, day, hour);
+        for (const { bearing, effectiveArea, orientation } of windowGroups) {
+          const gainWh = verticalIncident(pos.altitude, pos.azimuth, bearing, dni, dhi, ghi)
+            * effectiveArea;
+          monthlySolarWh[month - 1]       += gainWh;
+          byOrientationWh[orientation]    += gainWh;
+          daySolarKwh                     += gainWh / 1000;
+        }
+      }
+    }
+    // Flush the final day
+    if (prevDayKey !== null) {
+      const dayNet = Math.max(0, dayLossKwh - daySolarKwh - internalGainPerDay);
+      netDemand += dayNet;
+      if (prevMonth !== null) monthlyNetDemand[prevMonth - 1] += dayNet;
+    }
+
+    const annualSolar = monthlySolarWh.reduce((s, v) => s + v, 0) / 1000;
+    return {
+      netDemand,
+      monthlyNetDemand,
+      monthlySolar:  monthlySolarWh.map(v => v / 1000),
+      annualSolar,
+      byOrientation: Object.fromEntries(
+        Object.entries(byOrientationWh).map(([k, v]) => [k, v / 1000])
+      ),
+    };
+  }, [epwData, pb, internalTemp, windowGroups, electricityKwhPerDay, numPeople, hoursAtHome, ventilationHLC]);
 
   // ── Building model ──────────────────────────────────────────────────────────
   if (!pb || pb.rooms.length === 0) {
@@ -331,10 +448,13 @@ export default function HeatSummary() {
   }
 
   const { summary } = pb;
-  const hlc = summary.fabricHeatLossCoeff; // W/K
+  const hlc      = summary.fabricHeatLossCoeff; // W/K
+  const totalHLC = hlc + ventilationHLC;
 
   // Q (kWh) = HLC (W/K) × HDD (K·day) × 24 h/day ÷ 1000
-  const conductiveLoss = (hlc * hdd * 24) / 1000;
+  const conductiveLoss      = (hlc * hdd * 24) / 1000;
+  const ventilationLoss     = (ventilationHLC * hdd * 24) / 1000;
+  const totalFabricVentLoss = (totalHLC * hdd * 24) / 1000;
 
   // Internal gains
   const electricityGainKwh = electricityKwhPerDay * 365;
@@ -343,27 +463,32 @@ export default function HeatSummary() {
   // ── Per-element HLC breakdown ───────────────────────────────────────────────
   const heatedRooms = pb.rooms.filter(r => r.isHeated);
 
-  const wallHLC   = heatedRooms.flatMap(r => r.walls)
-    .filter(w => w.adjacency === "external")
-    .reduce((s, w) => s + w.heatLossCoeff, 0);
-  const windowHLC = heatedRooms.flatMap(r => r.walls).flatMap(w => w.openings)
-    .filter(o => o.type === "window").reduce((s, o) => s + o.heatLossCoeff, 0);
-  const doorHLC   = heatedRooms.flatMap(r => r.walls).flatMap(w => w.openings)
-    .filter(o => o.type === "door").reduce((s, o) => s + o.heatLossCoeff, 0);
-  const floorHLC  = heatedRooms.map(r => r.floor)
-    .filter(f => f.adjacency === "ground").reduce((s, f) => s + f.heatLossCoeff, 0);
-  const roofHLC   = heatedRooms.map(r => r.roof)
-    .filter(f => f.adjacency === "external").reduce((s, f) => s + f.heatLossCoeff, 0);
+  const externalWalls = heatedRooms.flatMap(r => r.walls).filter(w => w.adjacency === "external");
+  const allOpenings   = externalWalls.flatMap(w => w.openings);
+  const groundFloors  = heatedRooms.map(r => r.floor).filter(f => f.adjacency === "ground");
+  const externalRoofs = heatedRooms.map(r => r.roof).filter(f => f.adjacency === "external");
+
+  const wallHLC   = externalWalls.reduce((s, w) => s + w.heatLossCoeff, 0);
+  const windowHLC = allOpenings.filter(o => o.type === "window").reduce((s, o) => s + o.heatLossCoeff, 0);
+  const doorHLC   = allOpenings.filter(o => o.type === "door").reduce((s, o) => s + o.heatLossCoeff, 0);
+  const floorHLC  = groundFloors.reduce((s, f) => s + f.heatLossCoeff, 0);
+  const roofHLC   = externalRoofs.reduce((s, f) => s + f.heatLossCoeff, 0);
+
+  const wallArea   = externalWalls.reduce((s, w) => s + w.netOpaqueArea, 0);
+  const windowArea = allOpenings.filter(o => o.type === "window").reduce((s, o) => s + o.area, 0);
+  const doorArea   = allOpenings.filter(o => o.type === "door").reduce((s, o) => s + o.area, 0);
+  const floorArea  = groundFloors.reduce((s, f) => s + f.area, 0);
+  const roofArea   = externalRoofs.reduce((s, f) => s + f.area, 0);
 
   const toKwh = (v) => ((v * hdd * 24) / 1000).toFixed(0);
   const pct   = (v) => hlc > 0 ? ((v / hlc) * 100).toFixed(1) : "0.0";
 
   const elementRows = [
-    { label: "Opaque walls",   hlcVal: wallHLC,   color: "#60a5fa" },
-    { label: "Windows",        hlcVal: windowHLC, color: "#38bdf8" },
-    { label: "Doors",          hlcVal: doorHLC,   color: "#a78bfa" },
-    { label: "Ground floor",   hlcVal: floorHLC,  color: "#34d399" },
-    { label: "Roof / ceiling", hlcVal: roofHLC,   color: "#fbbf24" },
+    { label: "Opaque walls",   hlcVal: wallHLC,   area: wallArea,   color: "#60a5fa" },
+    { label: "Windows",        hlcVal: windowHLC, area: windowArea, color: "#38bdf8" },
+    { label: "Doors",          hlcVal: doorHLC,   area: doorArea,   color: "#a78bfa" },
+    { label: "Ground floor",   hlcVal: floorHLC,  area: floorArea,  color: "#34d399" },
+    { label: "Roof / ceiling", hlcVal: roofHLC,   area: roofArea,   color: "#fbbf24" },
   ];
 
   const Bar = ({ hlcVal, color }) => {
@@ -591,12 +716,16 @@ export default function HeatSummary() {
 
             {/* Per-element breakdown */}
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {elementRows.map(({ label, hlcVal, color }) => (
+              {elementRows.map(({ label, hlcVal, area, color }) => (
                 <div key={label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ width: 3, height: 28, background: color, borderRadius: 2, flexShrink: 0 }} />
                   <div style={{ width: 110, color: "#4a7fa5", fontSize: 10 }}>{label}</div>
                   <Bar hlcVal={hlcVal} color={color} />
-                  <div style={{ width: 72, textAlign: "right", color: "#c8d8f0", fontSize: 11, fontFamily: "monospace" }}>
+                  <div style={{ width: 52, textAlign: "right", color: "#4a7fa5", fontSize: 10, fontFamily: "monospace" }}>
+                    {area.toFixed(1)}
+                    <span style={{ fontSize: 7, color: "#2d5a8a", marginLeft: 2 }}>m²</span>
+                  </div>
+                  <div style={{ width: 64, textAlign: "right", color: "#c8d8f0", fontSize: 11, fontFamily: "monospace" }}>
                     {toKwh(hlcVal)}
                     <span style={{ fontSize: 8, color: "#2d5a8a", marginLeft: 3 }}>kWh</span>
                   </div>
@@ -622,8 +751,104 @@ export default function HeatSummary() {
             )}
           </Card>
 
+          {/* ── Ventilation / infiltration ── */}
+          <Card accent="#1e3a6b">
+            <SectionHeader label="VENTILATION &amp; INFILTRATION" />
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+              <NumInput
+                label="Air permeability (ACH50)"
+                value={ach50}
+                onChange={setAch50}
+                min={0.5} max={30} step={0.5}
+                unit="ACH@50Pa"
+              />
+              <NumInput
+                label="Derating factor (n₅₀)"
+                value={deratingFactor}
+                onChange={setDeratingFactor}
+                min={1} max={40} step={1}
+                unit="÷"
+              />
+              <div style={{ color: "#1e3a6b", fontSize: 8, lineHeight: 1.6 }}>
+                Natural ACH = ACH50 ÷ n₅₀. UK dwellings: n₅₀ = 20. Passivhaus: 25–30.
+              </div>
+            </div>
+
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "baseline",
+              padding: "10px 0 14px", borderBottom: "1px solid #132040", marginBottom: 14,
+            }}>
+              <div>
+                <div style={{ color: "#7dd3fc", fontSize: 22, fontFamily: "monospace", fontWeight: 700 }}>
+                  {ventilationLoss.toFixed(0)}
+                  <span style={{ fontSize: 12, color: "#2d5a8a", marginLeft: 6 }}>kWh/yr</span>
+                </div>
+                <div style={{ color: "#2d5a8a", fontSize: 9, marginTop: 3 }}>
+                  Infiltration {infiltrationHLC.toFixed(1)} W/K
+                  {mvhrEnabled && ` + MVHR ${mvhrVentHLC.toFixed(1)} W/K`}
+                  {" · "}natural ACH {naturalAch.toFixed(3)} · volume {summary.totalVolume.toFixed(0)} m³
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ color: "#4a7fa5", fontSize: 11 }}>
+                  {ventilationHLC.toFixed(1)}
+                  <span style={{ fontSize: 9, color: "#2d5a8a", marginLeft: 4 }}>W/K</span>
+                </div>
+                <div style={{ color: "#1e3a6b", fontSize: 9, marginTop: 2 }}>ventilation HLC</div>
+              </div>
+            </div>
+
+            {/* MVHR toggle */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: mvhrEnabled ? 12 : 0 }}>
+              <button
+                onClick={() => setMvhrEnabled(e => !e)}
+                style={{
+                  height: 22, padding: "0 10px",
+                  background: mvhrEnabled ? "#0c2a1a" : "transparent",
+                  color: mvhrEnabled ? "#34d399" : "#2d5a8a",
+                  border: `1px solid ${mvhrEnabled ? "#166534" : "#132040"}`,
+                  borderRadius: 4, cursor: "pointer",
+                  fontFamily: "monospace", fontSize: 9, letterSpacing: "0.08em",
+                }}
+              >
+                {mvhrEnabled ? "MVHR ON" : "MVHR OFF"}
+              </button>
+              <span style={{ color: "#2d5a8a", fontSize: 9 }}>Mechanical ventilation with heat recovery</span>
+            </div>
+
+            {mvhrEnabled && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingTop: 12, borderTop: "1px solid #132040" }}>
+                <NumInput
+                  label="Supply flow rate"
+                  value={mvhrFlow}
+                  onChange={setMvhrFlow}
+                  min={1} max={500} step={1}
+                  unit="l/s"
+                />
+                <NumInput
+                  label="Heat recovery efficiency"
+                  value={mvhrEfficiency}
+                  onChange={setMvhrEfficiency}
+                  min={0} max={100} step={1}
+                  unit="%"
+                />
+                <div style={{
+                  display: "flex", justifyContent: "space-between", alignItems: "baseline",
+                  paddingTop: 8, borderTop: "1px solid #132040",
+                }}>
+                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>MVHR heat loss ({(100 - mvhrEfficiency).toFixed(0)}% unrecovered)</span>
+                  <span style={{ fontFamily: "monospace", fontSize: 12, color: "#7dd3fc" }}>
+                    {mvhrVentHLC.toFixed(1)}
+                    <span style={{ fontSize: 8, color: "#2d5a8a", marginLeft: 4 }}>W/K</span>
+                  </span>
+                </div>
+              </div>
+            )}
+          </Card>
+
           {/* ── Solar gains ── */}
-          {solarGains ? (
+          {combined && windowGroups.length > 0 ? (
             <Card accent="#78350f">
               <SectionHeader label="SOLAR GAINS THROUGH GLAZING" />
 
@@ -634,7 +859,7 @@ export default function HeatSummary() {
               }}>
                 <div>
                   <div style={{ color: "#fbbf24", fontSize: 22, fontFamily: "monospace", fontWeight: 700 }}>
-                    {solarGains.annualKwh.toFixed(0)}
+                    {combined.annualSolar.toFixed(0)}
                     <span style={{ fontSize: 12, color: "#78350f", marginLeft: 6 }}>kWh/yr</span>
                   </div>
                   <div style={{ color: "#78350f", fontSize: 9, marginTop: 3 }}>
@@ -655,20 +880,20 @@ export default function HeatSummary() {
                 <div style={{ color: "#78350f", fontSize: 9, marginBottom: 8, letterSpacing: "0.1em" }}>
                   MONTHLY SOLAR GAIN
                 </div>
-                <MonthlySolarChart monthlySolar={solarGains.monthly} />
+                <MonthlySolarChart monthlySolar={combined.monthlySolar} />
               </div>
 
               {/* By orientation */}
-              {Object.keys(solarGains.byOrientation).length > 0 && (
+              {Object.keys(combined.byOrientation).length > 0 && (
                 <div>
                   <div style={{ color: "#78350f", fontSize: 9, marginBottom: 8, letterSpacing: "0.1em" }}>
                     BY ORIENTATION
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {Object.entries(solarGains.byOrientation)
+                    {Object.entries(combined.byOrientation)
                       .sort((a, b) => b[1] - a[1])
                       .map(([or, kwh]) => {
-                        const width = solarGains.annualKwh > 0 ? (kwh / solarGains.annualKwh) * 100 : 0;
+                        const width = combined.annualSolar > 0 ? (kwh / combined.annualSolar) * 100 : 0;
                         const grp   = windowGroups.find(g => g.orientation === or);
                         return (
                           <div key={or} style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -692,18 +917,6 @@ export default function HeatSummary() {
                   </div>
                 </div>
               )}
-
-              {/* Net balance */}
-              <div style={{
-                marginTop: 16, paddingTop: 12, borderTop: "1px solid #132040",
-                display: "flex", justifyContent: "space-between", alignItems: "baseline",
-              }}>
-                <span style={{ color: "#4a7fa5", fontSize: 10 }}>Net fabric losses (conductive − solar)</span>
-                <span style={{ fontFamily: "monospace", fontSize: 13, color: "#c8d8f0" }}>
-                  {(conductiveLoss - solarGains.annualKwh).toFixed(0)}
-                  <span style={{ fontSize: 9, color: "#2d5a8a", marginLeft: 4 }}>kWh/yr</span>
-                </span>
-              </div>
             </Card>
           ) : epwData && windowGroups.length === 0 ? (
             <Card>
@@ -780,28 +993,36 @@ export default function HeatSummary() {
           </Card>
 
           {/* ── Net heat demand ── */}
-          {(solarGains || electricityGainKwh > 0 || peopleGainKwh > 0) && (
-            <Card accent="#1e3a6b">
-              <SectionHeader label="NET HEAT DEMAND" />
+          <Card accent="#1e3a6b">
+            <SectionHeader label="NET HEAT DEMAND" />
+
+            <div style={{ marginBottom: 14 }}>
+              <NumInput
+                label="Internal (design) temperature"
+                value={internalTemp}
+                onChange={setInternalTemp}
+                min={10} max={30} step={0.5}
+                unit="°C"
+              />
+            </div>
+
+            {combined !== null ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>Conductive losses</span>
-                  <span style={{ fontFamily: "monospace", fontSize: 12, color: "#c8d8f0" }}>
-                    {conductiveLoss.toFixed(0)}
-                    <span style={{ fontSize: 8, color: "#2d5a8a", marginLeft: 4 }}>kWh/yr</span>
-                  </span>
+                <div style={{ color: "#1e3a6b", fontSize: 8, marginBottom: 6, lineHeight: 1.6 }}>
+                  Computed day-by-day: fabric + ventilation loss at {internalTemp}°C minus solar and internal gains per day,
+                  so summer surpluses do not offset winter heating.
                 </div>
-                {solarGains && (
+                {combined && windowGroups.length > 0 && (
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                    <span style={{ color: "#4a7fa5", fontSize: 10 }}>− Solar gains</span>
+                    <span style={{ color: "#4a7fa5", fontSize: 10 }}>Solar gains offset</span>
                     <span style={{ fontFamily: "monospace", fontSize: 12, color: "#fbbf24" }}>
-                      {solarGains.annualKwh.toFixed(0)}
+                      {combined.annualSolar.toFixed(0)}
                       <span style={{ fontSize: 8, color: "#78350f", marginLeft: 4 }}>kWh/yr</span>
                     </span>
                   </div>
                 )}
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>− Internal gains</span>
+                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>Internal gains offset</span>
                   <span style={{ fontFamily: "monospace", fontSize: 12, color: "#34d399" }}>
                     {(electricityGainKwh + peopleGainKwh).toFixed(0)}
                     <span style={{ fontSize: 8, color: "#134e2a", marginLeft: 4 }}>kWh/yr</span>
@@ -813,13 +1034,34 @@ export default function HeatSummary() {
                 }}>
                   <span style={{ color: "#7dd3fc", fontSize: 12, fontWeight: 700 }}>Net heating demand</span>
                   <span style={{ fontFamily: "monospace", fontSize: 18, color: "#7dd3fc", fontWeight: 700 }}>
-                    {Math.max(0, conductiveLoss - (solarGains?.annualKwh ?? 0) - electricityGainKwh - peopleGainKwh).toFixed(0)}
+                    {combined.netDemand.toFixed(0)}
                     <span style={{ fontSize: 10, color: "#2d5a8a", marginLeft: 6 }}>kWh/yr</span>
                   </span>
                 </div>
+                {summary.totalFloorArea > 0 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                    <span style={{ color: "#4a7fa5", fontSize: 10 }}>Heat demand intensity</span>
+                    <span style={{ fontFamily: "monospace", fontSize: 13, color: "#7dd3fc" }}>
+                      {(combined.netDemand / summary.totalFloorArea).toFixed(1)}
+                      <span style={{ fontSize: 9, color: "#2d5a8a", marginLeft: 4 }}>kWh/m²·yr</span>
+                    </span>
+                  </div>
+                )}
+                {combined.monthlyNetDemand && (
+                  <div style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid #132040" }}>
+                    <div style={{ color: "#2d5a8a", fontSize: 9, marginBottom: 8, letterSpacing: "0.1em" }}>
+                      MONTHLY NET HEATING DEMAND
+                    </div>
+                    <MonthlyNetDemandChart monthlyNetDemand={combined.monthlyNetDemand} />
+                  </div>
+                )}
               </div>
-            </Card>
-          )}
+            ) : (
+              <div style={{ color: "#2d5a8a", fontSize: 10 }}>
+                Load an EPW weather file to compute net heating demand.
+              </div>
+            )}
+          </Card>
 
           {/* ── Warnings ── */}
           {summary.warnings.length > 0 && (

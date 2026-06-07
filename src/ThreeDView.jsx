@@ -3,9 +3,10 @@ import * as THREE from "three";
 import { buildingModelFromState, processBuilding } from "./geometryProcessor.js";
 
 // Load and process the BuildingModel written by FloorPlanUI.
-const loadProcessedBuilding = () => {
+const loadProcessedBuilding = (projectId) => {
+  const pk = (key) => `${projectId}_${key}`;
   try {
-    const raw = localStorage.getItem("building_model");
+    const raw = localStorage.getItem(pk("building_model"));
     if (raw) {
       const model = JSON.parse(raw);
       return processBuilding(model);
@@ -14,9 +15,9 @@ const loadProcessedBuilding = () => {
 
   // Fallback: reconstruct from raw editor state if building_model not yet written.
   try {
-    const roomsByStorey = JSON.parse(localStorage.getItem("floorplan_rooms")) || { 0: [], 1: [], 2: [] };
-    const ceilingHeights = JSON.parse(localStorage.getItem("floorplan_ceilings")) || { 0: 3.0, 1: 2.7, 2: 2.5 };
-    const globalU = JSON.parse(localStorage.getItem("floorplan_uvalues")) || null;
+    const roomsByStorey = JSON.parse(localStorage.getItem(pk("floorplan_rooms"))) || { 0: [], 1: [], 2: [] };
+    const ceilingHeights = JSON.parse(localStorage.getItem(pk("floorplan_ceilings"))) || { 0: 3.0, 1: 2.7, 2: 2.5 };
+    const globalU = JSON.parse(localStorage.getItem(pk("floorplan_uvalues"))) || null;
     const model = buildingModelFromState({ roomsByStorey, ceilingHeights, globalU });
     return processBuilding(model);
   } catch {
@@ -137,7 +138,7 @@ const createWallWithOpenings = (ptA, ptB, wallHeight, openings) => {
   return group;
 };
 
-export default function ThreeDView() {
+export default function ThreeDView({ projectId }) {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
   const [loading, setLoading] = useState(true);
@@ -152,7 +153,7 @@ export default function ThreeDView() {
       mountRef.current.removeChild(existingCanvas);
     }
 
-    const processedBuilding = loadProcessedBuilding();
+    const processedBuilding = loadProcessedBuilding(projectId);
 
     if (!processedBuilding || processedBuilding.rooms.length === 0) {
       setInfo("No rooms in floor plan. Draw rooms in the Floor Plan tab first.");

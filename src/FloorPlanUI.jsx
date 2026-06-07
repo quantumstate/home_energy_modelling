@@ -305,7 +305,8 @@ function NorthOverlay({ rotation }) {
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
-export default function FloorPlanUI() {
+export default function FloorPlanUI({ projectId }) {
+  const pk = (key) => `${projectId}_${key}`;
   const svgRef = useRef(null);
 
   // ── View ──
@@ -320,19 +321,19 @@ export default function FloorPlanUI() {
   const [activeStorey, setActiveStorey] = useState(0);
 
   const [roomsByStorey, setRoomsByStorey] = useState(() => {
-    try { const s = localStorage.getItem("floorplan_rooms"); return s ? JSON.parse(s) : { 0:[], 1:[], 2:[] }; }
+    try { const s = localStorage.getItem(pk("floorplan_rooms")); return s ? JSON.parse(s) : { 0:[], 1:[], 2:[] }; }
     catch { return { 0:[], 1:[], 2:[] }; }
   });
   const [ceilingHeights, setCeilingHeights] = useState(() => {
-    try { const s = localStorage.getItem("floorplan_ceilings"); return s ? JSON.parse(s) : { 0:3.0, 1:2.7, 2:2.5 }; }
+    try { const s = localStorage.getItem(pk("floorplan_ceilings")); return s ? JSON.parse(s) : { 0:3.0, 1:2.7, 2:2.5 }; }
     catch { return { 0:3.0, 1:2.7, 2:2.5 }; }
   });
   const [globalU, setGlobalU] = useState(() => {
-    try { const s = localStorage.getItem("floorplan_uvalues"); return s ? JSON.parse(s) : { ...DEFAULT_U_VALUES }; }
+    try { const s = localStorage.getItem(pk("floorplan_uvalues")); return s ? JSON.parse(s) : { ...DEFAULT_U_VALUES }; }
     catch { return { ...DEFAULT_U_VALUES }; }
   });
   const [buildingRotation, setBuildingRotation] = useState(() => {
-    try { const s = localStorage.getItem("floorplan_rotation"); return s ? JSON.parse(s) : 0; }
+    try { const s = localStorage.getItem(pk("floorplan_rotation")); return s ? JSON.parse(s) : 0; }
     catch { return 0; }
   });
 
@@ -355,10 +356,10 @@ export default function FloorPlanUI() {
 
   // ── Persist ──
   const [savedAt, setSavedAt] = useState(null);
-  useEffect(() => { try { localStorage.setItem("floorplan_rooms", JSON.stringify(roomsByStorey)); setSavedAt(new Date()); } catch {} }, [roomsByStorey]);
-  useEffect(() => { try { localStorage.setItem("floorplan_ceilings", JSON.stringify(ceilingHeights)); } catch {} }, [ceilingHeights]);
-  useEffect(() => { try { localStorage.setItem("floorplan_uvalues",   JSON.stringify(globalU));           } catch {} }, [globalU]);
-  useEffect(() => { try { localStorage.setItem("floorplan_rotation", JSON.stringify(buildingRotation));   } catch {} }, [buildingRotation]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_rooms"), JSON.stringify(roomsByStorey)); setSavedAt(new Date()); } catch {} }, [roomsByStorey]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_ceilings"), JSON.stringify(ceilingHeights)); } catch {} }, [ceilingHeights]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_uvalues"),   JSON.stringify(globalU));           } catch {} }, [globalU]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_rotation"), JSON.stringify(buildingRotation));   } catch {} }, [buildingRotation]);
 
   // Persist BuildingModel so other views (3D, energy model) can consume it.
   useEffect(() => {
@@ -367,14 +368,14 @@ export default function FloorPlanUI() {
         roomsByStorey, ceilingHeights, globalU,
         site: { buildingRotation },
       });
-      localStorage.setItem("building_model", JSON.stringify(model));
+      localStorage.setItem(pk("building_model"), JSON.stringify(model));
     } catch {}
   }, [roomsByStorey, ceilingHeights, globalU, buildingRotation]);
 
   const clearStorage = () => {
     if (!window.confirm("Clear all floors and start over?")) return;
     recorder.record("clear_all");
-    try { ["floorplan_rooms","floorplan_ceilings","floorplan_uvalues","floorplan_rotation"].forEach(k => localStorage.removeItem(k)); } catch {}
+    try { ["floorplan_rooms","floorplan_ceilings","floorplan_uvalues","floorplan_rotation"].forEach(k => localStorage.removeItem(pk(k))); } catch {}
     setRoomsByStorey({ 0:[], 1:[], 2:[] });
     setCeilingHeights({ 0:3.0, 1:2.7, 2:2.5 });
     setGlobalU({ ...DEFAULT_U_VALUES });
