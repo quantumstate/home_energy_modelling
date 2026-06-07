@@ -440,8 +440,16 @@ export default function HeatSummary({ projectId }) {
     }
 
     const annualSolar = monthlySolarWh.reduce((s, v) => s + v, 0) / 1000;
+
+    // Split net demand proportionally by fabric vs ventilation HLC
+    const fabricHLC = pb.summary.fabricHeatLossCoeff;
+    const fabricFrac = hlcVal > 0 ? fabricHLC / hlcVal : 1;
+    const ventFrac   = hlcVal > 0 ? ventilationHLC / hlcVal : 0;
+
     return {
       netDemand,
+      netDemandFabric: netDemand * fabricFrac,
+      netDemandVent:   netDemand * ventFrac,
       monthlyNetDemand,
       monthlySolar:  monthlySolarWh.map(v => v / 1000),
       annualSolar,
@@ -1052,6 +1060,20 @@ export default function HeatSummary({ projectId }) {
                   <span style={{ fontFamily: "monospace", fontSize: 18, color: "#7dd3fc", fontWeight: 700 }}>
                     {combined.netDemand.toFixed(0)}
                     <span style={{ fontSize: 10, color: "#2d5a8a", marginLeft: 6 }}>kWh/yr</span>
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>↳ conductive (fabric)</span>
+                  <span style={{ fontFamily: "monospace", fontSize: 11, color: "#60a5fa" }}>
+                    {combined.netDemandFabric.toFixed(0)}
+                    <span style={{ fontSize: 8, color: "#2d5a8a", marginLeft: 4 }}>kWh/yr</span>
+                  </span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>↳ ventilation / infiltration</span>
+                  <span style={{ fontFamily: "monospace", fontSize: 11, color: "#60a5fa" }}>
+                    {combined.netDemandVent.toFixed(0)}
+                    <span style={{ fontSize: 8, color: "#2d5a8a", marginLeft: 4 }}>kWh/yr</span>
                   </span>
                 </div>
                 {summary.totalFloorArea > 0 && (
