@@ -273,15 +273,18 @@ function EPWDropZone({ onLoad, error }) {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function HeatSummary({ projectId }) {
+  const pk = (key) => `${projectId}_hs_${key}`;
+  const load = (key, def) => { try { const s = localStorage.getItem(pk(key)); return s !== null ? JSON.parse(s) : def; } catch { return def; } };
+
   // EPW state
   const [epwData,    setEpwData]    = useState(null);   // parsed EPW result
   const [epwName,    setEpwName]    = useState(null);   // filename
   const [epwError,   setEpwError]   = useState(null);
-  const [baseTemp,   setBaseTemp]   = useState(15.5);   // °C — CIBSE UK default
+  const [baseTemp,   setBaseTemp]   = useState(() => load("baseTemp", 15.5));
 
   // HDD: derived from EPW when available, otherwise user-editable
-  const [hddManual,  setHddManual]  = useState(2500);
-  const [hddOverride, setHddOverride] = useState(false); // user overriding EPW value
+  const [hddManual,   setHddManual]  = useState(() => load("hddManual", 2500));
+  const [hddOverride, setHddOverride] = useState(false);
 
   const pb = useMemo(() => loadProcessedBuilding(projectId), [projectId]);
 
@@ -345,11 +348,11 @@ export default function HeatSummary({ projectId }) {
   }, [pb]);
 
   // ── Ventilation inputs ──────────────────────────────────────────────────────
-  const [ach50,          setAch50]          = useState(5.0);
-  const [deratingFactor, setDeratingFactor] = useState(20);
-  const [mvhrEnabled,    setMvhrEnabled]    = useState(false);
-  const [mvhrFlow,       setMvhrFlow]       = useState(30);   // l/s
-  const [mvhrEfficiency, setMvhrEfficiency] = useState(80);   // %
+  const [ach50,          setAch50]          = useState(() => load("ach50", 5.0));
+  const [deratingFactor, setDeratingFactor] = useState(() => load("deratingFactor", 20));
+  const [mvhrEnabled,    setMvhrEnabled]    = useState(() => load("mvhrEnabled", false));
+  const [mvhrFlow,       setMvhrFlow]       = useState(() => load("mvhrFlow", 30));
+  const [mvhrEfficiency, setMvhrEfficiency] = useState(() => load("mvhrEfficiency", 80));
 
   // Ventilation HLC computed here so it is available to the combined useMemo below.
   // Uses pb?.summary?.totalVolume so it evaluates safely before the early-return guard.
@@ -361,10 +364,23 @@ export default function HeatSummary({ projectId }) {
   const ventilationHLC  = infiltrationHLC + mvhrVentHLC;
 
   // ── Internal gains + heating inputs ────────────────────────────────────────
-  const [electricityKwhPerDay, setElectricityKwhPerDay] = useState(8);
-  const [numPeople,            setNumPeople]            = useState(2);
-  const [hoursAtHome,          setHoursAtHome]          = useState(12);
-  const [internalTemp,         setInternalTemp]         = useState(21);
+  const [electricityKwhPerDay, setElectricityKwhPerDay] = useState(() => load("electricityKwhPerDay", 8));
+  const [numPeople,            setNumPeople]            = useState(() => load("numPeople", 2));
+  const [hoursAtHome,          setHoursAtHome]          = useState(() => load("hoursAtHome", 12));
+  const [internalTemp,         setInternalTemp]         = useState(() => load("internalTemp", 21));
+
+  // ── Persist all user inputs ──────────────────────────────────────────────────
+  useEffect(() => { try { localStorage.setItem(pk("baseTemp"),              JSON.stringify(baseTemp));              } catch {} }, [baseTemp]);
+  useEffect(() => { try { localStorage.setItem(pk("hddManual"),             JSON.stringify(hddManual));             } catch {} }, [hddManual]);
+  useEffect(() => { try { localStorage.setItem(pk("ach50"),                 JSON.stringify(ach50));                 } catch {} }, [ach50]);
+  useEffect(() => { try { localStorage.setItem(pk("deratingFactor"),        JSON.stringify(deratingFactor));        } catch {} }, [deratingFactor]);
+  useEffect(() => { try { localStorage.setItem(pk("mvhrEnabled"),           JSON.stringify(mvhrEnabled));           } catch {} }, [mvhrEnabled]);
+  useEffect(() => { try { localStorage.setItem(pk("mvhrFlow"),              JSON.stringify(mvhrFlow));              } catch {} }, [mvhrFlow]);
+  useEffect(() => { try { localStorage.setItem(pk("mvhrEfficiency"),        JSON.stringify(mvhrEfficiency));        } catch {} }, [mvhrEfficiency]);
+  useEffect(() => { try { localStorage.setItem(pk("electricityKwhPerDay"),  JSON.stringify(electricityKwhPerDay));  } catch {} }, [electricityKwhPerDay]);
+  useEffect(() => { try { localStorage.setItem(pk("numPeople"),             JSON.stringify(numPeople));             } catch {} }, [numPeople]);
+  useEffect(() => { try { localStorage.setItem(pk("hoursAtHome"),           JSON.stringify(hoursAtHome));           } catch {} }, [hoursAtHome]);
+  useEffect(() => { try { localStorage.setItem(pk("internalTemp"),          JSON.stringify(internalTemp));          } catch {} }, [internalTemp]);
 
   // Single pass over hourly EPW data: accumulates solar gain and fabric heat loss together
   // per day, then applies max(0, loss - solar - internal) per day.
