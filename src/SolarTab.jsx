@@ -477,6 +477,7 @@ const STOREY_LABELS = ["Ground floor", "First floor", "Second floor", "Third flo
 export default function SolarTab({ projectId }) {
   const [selectedKey, setSelectedKey] = useState(null);
   const [efficiency, setEfficiency] = useState(20); // percent
+  const [perfRatio, setPerfRatio] = useState(80); // percent
 
   const roofsByStorey = useMemo(() => loadRoofsByStorey(projectId), [projectId]);
 
@@ -593,25 +594,31 @@ export default function SolarTab({ projectId }) {
         {/* Panel efficiency — always visible */}
         <div style={{ background: "#070d1a", border: "1px solid #132040", borderRadius: 6, padding: "14px 16px", marginBottom: 16, maxWidth: 480 }}>
           <SectionHeader label="PANEL SETTINGS" />
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ color: "#4a7fa5", fontSize: 11, flex: 1 }}>Panel efficiency</span>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, background: "#0a1628", border: "1px solid #1e3a6b", borderRadius: 5, padding: "4px 8px" }}>
-              <button onClick={() => setEfficiency(e => Math.max(1, e - 1))}
-                style={{ width: 22, height: 22, background: "#070d1a", border: "1px solid #1e3a6b", color: "#93c5fd", borderRadius: 3, cursor: "pointer", fontSize: 14, lineHeight: 1 }}>−</button>
-              <input type="number" min="1" max="100" step="1" value={efficiency}
-                onChange={e => { const v = parseInt(e.target.value); if (!isNaN(v)) setEfficiency(Math.max(1, Math.min(100, v))); }}
-                style={{ width: 36, textAlign: "center", background: "transparent", border: "none", color: "#c8d8f0", fontSize: 14, fontFamily: "monospace", outline: "none" }} />
-              <button onClick={() => setEfficiency(e => Math.min(100, e + 1))}
-                style={{ width: 22, height: 22, background: "#070d1a", border: "1px solid #1e3a6b", color: "#93c5fd", borderRadius: 3, cursor: "pointer", fontSize: 14, lineHeight: 1 }}>+</button>
-              <span style={{ color: "#2d5a8a", fontSize: 11, fontFamily: "monospace" }}>%</span>
+          {[
+            { label: "Panel efficiency", value: efficiency, set: setEfficiency, min: 1, max: 100, step: 1 },
+            { label: "Performance ratio", value: perfRatio,  set: setPerfRatio,  min: 50, max: 100, step: 1 },
+          ].map(({ label, value, set, min, max, step }) => (
+            <div key={label} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <span style={{ color: "#4a7fa5", fontSize: 11, flex: 1 }}>{label}</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, background: "#0a1628", border: "1px solid #1e3a6b", borderRadius: 5, padding: "4px 8px" }}>
+                <button onClick={() => set(v => Math.max(min, v - step))}
+                  style={{ width: 22, height: 22, background: "#070d1a", border: "1px solid #1e3a6b", color: "#93c5fd", borderRadius: 3, cursor: "pointer", fontSize: 14, lineHeight: 1 }}>−</button>
+                <input type="number" min={min} max={max} step={step} value={value}
+                  onChange={e => { const v = parseInt(e.target.value); if (!isNaN(v)) set(Math.max(min, Math.min(max, v))); }}
+                  style={{ width: 36, textAlign: "center", background: "transparent", border: "none", color: "#c8d8f0", fontSize: 14, fontFamily: "monospace", outline: "none" }} />
+                <button onClick={() => set(v => Math.min(max, v + step))}
+                  style={{ width: 22, height: 22, background: "#070d1a", border: "1px solid #1e3a6b", color: "#93c5fd", borderRadius: 3, cursor: "pointer", fontSize: 14, lineHeight: 1 }}>+</button>
+                <span style={{ color: "#2d5a8a", fontSize: 11, fontFamily: "monospace" }}>%</span>
+              </div>
             </div>
-          </div>
+          ))}
         </div>
 
         {selectedPlane ? (() => {
           const eff = efficiency / 100;
-          const annualOutput = selectedPlane.annualIrradiation * eff; // kWh/m²/yr
-          const totalOutput  = annualOutput * selectedPlane.slopeArea;  // kWh/yr
+          const pr  = perfRatio / 100;
+          const annualOutput = selectedPlane.annualIrradiation * eff * pr; // kWh/m²/yr
+          const totalOutput  = annualOutput * selectedPlane.slopeArea;     // kWh/yr
           const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
           const maxMonthly = Math.max(...selectedPlane.monthlyIrradiation);
           return (
@@ -635,7 +642,8 @@ export default function SolarTab({ projectId }) {
               <div style={{ background: "#070d1a", border: "1px solid #78350f", borderRadius: 6, padding: "14px 16px", marginBottom: 14 }}>
                 <SectionHeader label="SOLAR POTENTIAL" />
                 <MetricRow label="Annual irradiation" value={selectedPlane.annualIrradiation.toFixed(0)} unit="kWh/m²/yr" />
-                <MetricRow label={`Output per m² (${efficiency}% eff.)`} value={annualOutput.toFixed(0)} unit="kWh/m²/yr" />
+                <MetricRow label="Specific yield" value={(selectedPlane.annualIrradiation * pr).toFixed(0)} unit="kWh/kWp" />
+                <MetricRow label={`Output per m² (${efficiency}% · PR ${perfRatio}%)`} value={annualOutput.toFixed(0)} unit="kWh/m²/yr" />
                 <MetricRow label="Total annual output" value={totalOutput.toFixed(0)} unit="kWh/yr" />
               </div>
 
