@@ -60,6 +60,115 @@ const projectOntoWall = (pt, a, b) => {
 let _uid = 0;
 const uid = () => `id${++_uid}`;
 
+// ─── Roof geometry ────────────────────────────────────────────────────────────
+// Straight-skeleton algorithm for ridge/hip line computation.
+// Only vertices where BOTH flanking edges are "bottom" (active) trace ridge paths.
+function computeRoofLines(points, edgeTypes) {
+  const n = points.length;
+  if (n < 3) return [];
+
+  const inwardNormal = (a, b, cen) => {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < 1e-10) return { x: 0, y: 0 };
+    let nx = -dy / len, ny = dx / len;
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    if ((cen.x - mx) * nx + (cen.y - my) * ny < 0) { nx = -nx; ny = -ny; }
+    return { x: nx, y: ny };
+  };
+
+  let verts = points.map(p => ({ ...p }));
+  let active = edgeTypes.map(e => e === 'bottom');
+  const segments = [];
+
+  for (let iter = 0; iter < 200; iter++) {
+    const m = verts.length;
+    if (m < 3) {
+      if (m === 2 && active.some(a => a)) {
+        const dx = verts[1].x - verts[0].x, dy = verts[1].y - verts[0].y;
+        if (dx * dx + dy * dy > 1e-6)
+          segments.push({ x1: verts[0].x, y1: verts[0].y, x2: verts[1].x, y2: verts[1].y });
+      }
+      break;
+    }
+    if (!active.some(a => a)) break;
+
+    const cen = { x: verts.reduce((s, v) => s + v.x, 0) / m, y: verts.reduce((s, v) => s + v.y, 0) / m };
+    const norms = verts.map((v, i) => inwardNormal(v, verts[(i + 1) % m], cen));
+
+    const bisect = (i) => {
+      const pe = (i - 1 + m) % m, ce = i;
+      const pa = active[pe], ca = active[ce];
+      if (!pa && !ca) return { x: 0, y: 0 };
+      const np = norms[pe], nc = norms[ce];
+      if (pa && ca) {
+        const d = 1 + np.x * nc.x + np.y * nc.y;
+        return Math.abs(d) < 1e-10 ? { x: 0, y: 0 } : { x: (np.x + nc.x) / d, y: (np.y + nc.y) / d };
+      }
+      const an = pa ? np : nc, ie = pa ? ce : pe;
+      const a = verts[ie], b = verts[(ie + 1) % m];
+      const edx = b.x - a.x, edy = b.y - a.y, el = Math.sqrt(edx * edx + edy * edy);
+      if (el < 1e-10) return { x: 0, y: 0 };
+      let ex = edx / el, ey = edy / el;
+      let dot = an.x * ex + an.y * ey;
+      if (dot < 0) { ex = -ex; ey = -ey; dot = -dot; }
+      if (dot < 1e-6) return { x: 0, y: 0 };
+      return { x: ex / dot, y: ey / dot };
+    };
+
+    const bs = verts.map((_, i) => bisect(i));
+
+    let minT = Infinity;
+    const coll = [];
+    for (let i = 0; i < m; i++) {
+      const j = (i + 1) % m;
+      const bi = bs[i], bj = bs[j];
+      const rx = verts[i].x - verts[j].x, ry = verts[i].y - verts[j].y;
+      const dvx = bi.x - bj.x, dvy = bi.y - bj.y;
+      const dv2 = dvx * dvx + dvy * dvy;
+      if (dv2 < 1e-12) continue;
+      const tc = -(rx * dvx + ry * dvy) / dv2;
+      if (tc < 1e-9) continue;
+      const fx = rx + tc * dvx, fy = ry + tc * dvy;
+      if (fx * fx + fy * fy < 1e-3) {
+        if (tc < minT - 1e-9) { minT = tc; coll.length = 0; coll.push(i); }
+        else if (tc < minT + 1e-9) coll.push(i);
+      }
+    }
+    if (!coll.length || minT > 1e6) break;
+
+    const nv = verts.map((v, i) => ({ x: v.x + bs[i].x * minT, y: v.y + bs[i].y * minT }));
+
+    // Only bottom-bottom vertex paths are real ridge/hip lines
+    for (let i = 0; i < m; i++) {
+      const pe = (i - 1 + m) % m;
+      if (!active[pe] || !active[i]) continue;
+      const dx = nv[i].x - verts[i].x, dy = nv[i].y - verts[i].y;
+      if (dx * dx + dy * dy > 1e-8)
+        segments.push({ x1: verts[i].x, y1: verts[i].y, x2: nv[i].x, y2: nv[i].y });
+    }
+
+    const rem = new Set();
+    for (const i of coll) {
+      const j = (i + 1) % m;
+      const mp = { x: (nv[i].x + nv[j].x) / 2, y: (nv[i].y + nv[j].y) / 2 };
+      nv[i] = mp; rem.add(j);
+    }
+
+    const nVerts = [], nActive = [];
+    for (let i = 0; i < m; i++) {
+      if (rem.has(i)) continue;
+      nVerts.push({ ...nv[i] });
+      nActive.push(coll.includes(i) ? active[(i + 1) % m] : active[i]);
+    }
+    verts = nVerts; active = nActive;
+  }
+  return segments;
+}
+
+const ROOF_COLOR  = { fill: "#f59e0b", line: "#f59e0b", label: "#fde68a" };
+const ROOF_DEFAULT_PITCH = 35;
+
 // ─── Opening symbols ──────────────────────────────────────────────────────────
 function wallWithOpenings(ptA, ptB, openings, wallColor, lw, isPreview) {
   const wLen = dist(ptA, ptB);
@@ -337,6 +446,19 @@ export default function FloorPlanUI({ projectId }) {
     catch { return 0; }
   });
 
+  const [roofsByStorey, setRoofsByStorey] = useState(() => {
+    try { const s = localStorage.getItem(pk("floorplan_roofs")); return s ? JSON.parse(s) : { 0:[], 1:[], 2:[] }; }
+    catch { return { 0:[], 1:[], 2:[] }; }
+  });
+
+  const roofs = roofsByStorey[activeStorey] || [];
+  const setRoofs = useCallback((updater) => {
+    setRoofsByStorey(prev => ({
+      ...prev,
+      [activeStorey]: typeof updater === "function" ? updater(prev[activeStorey] || []) : updater,
+    }));
+  }, [activeStorey]);
+
   const ceilingH = ceilingHeights[activeStorey];
   const adjustCeiling = (delta) => {
     setCeilingHeights(h => {
@@ -360,6 +482,7 @@ export default function FloorPlanUI({ projectId }) {
   useEffect(() => { try { localStorage.setItem(pk("floorplan_ceilings"), JSON.stringify(ceilingHeights)); } catch {} }, [ceilingHeights]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_uvalues"),   JSON.stringify(globalU));           } catch {} }, [globalU]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_rotation"), JSON.stringify(buildingRotation));   } catch {} }, [buildingRotation]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_roofs"),    JSON.stringify(roofsByStorey));      } catch {} }, [roofsByStorey]);
 
   // Persist BuildingModel so other views (3D, energy model) can consume it.
   useEffect(() => {
@@ -375,12 +498,14 @@ export default function FloorPlanUI({ projectId }) {
   const clearStorage = () => {
     if (!window.confirm("Clear all floors and start over?")) return;
     recorder.record("clear_all");
-    try { ["floorplan_rooms","floorplan_ceilings","floorplan_uvalues","floorplan_rotation"].forEach(k => localStorage.removeItem(pk(k))); } catch {}
+    try { ["floorplan_rooms","floorplan_ceilings","floorplan_uvalues","floorplan_rotation","floorplan_roofs"].forEach(k => localStorage.removeItem(pk(k))); } catch {}
     setRoomsByStorey({ 0:[], 1:[], 2:[] });
     setCeilingHeights({ 0:3.0, 1:2.7, 2:2.5 });
     setGlobalU({ ...DEFAULT_U_VALUES });
     setBuildingRotation(0);
+    setRoofsByStorey({ 0:[], 1:[], 2:[] });
     setSelectedId(null); setSelectedOpening(null); setDraft([]);
+    setSelectedRoofId(null); setRoofDraft([]);
   };
 
   // ── Session recording ──
@@ -413,6 +538,11 @@ export default function FloorPlanUI({ projectId }) {
   const [cursor,    setCursor]    = useState({ x:0, y:0 });
   const [snapOn,    setSnapOn]    = useState(true);
   const [showGhost, setShowGhost] = useState(true);
+
+  // ── Roof drawing & selection ──
+  const [roofDraft,      setRoofDraft]      = useState([]);
+  const [selectedRoofId, setSelectedRoofId] = useState(null);
+  const [selectedRoofEdge, setSelectedRoofEdge] = useState(null); // { roofId, edgeIdx }
 
   // ── Selection ──
   const [selectedId,      setSelectedId]      = useState(null);
@@ -569,6 +699,63 @@ export default function FloorPlanUI({ projectId }) {
       }
       return;
     }
+    if (tool === "roof") {
+      // Check if clicking on an edge of selected roof (edge type toggle)
+      if (selectedRoofId) {
+        const selRoof = roofs.find(r => r.id === selectedRoofId);
+        if (selRoof) {
+          const { points: rp } = selRoof;
+          for (let i = 0; i < rp.length; i++) {
+            const j = (i + 1) % rp.length;
+            if (distToSegment(rawPt, rp[i], rp[j]) < WALL_HOVER_THRESHOLD) {
+              setSelectedRoofEdge({ roofId: selectedRoofId, edgeIdx: i });
+              return;
+            }
+          }
+        }
+      }
+      // Drawing new roof polygon
+      if (roofDraft.length >= 3 && dist(pt, roofDraft[0]) < closeThreshold) {
+        const newRoof = {
+          id: uid(),
+          points: [...roofDraft],
+          pitch: ROOF_DEFAULT_PITCH,
+          edgeTypes: roofDraft.map(() => 'bottom'),
+        };
+        setRoofs(rs => [...rs, newRoof]);
+        setSelectedRoofId(newRoof.id);
+        setSelectedRoofEdge(null);
+        recorder.record("roof_close", { points: [...roofDraft] });
+        setRoofDraft([]);
+      } else {
+        recorder.record("roof_point", { pt });
+        setRoofDraft(d => [...d, pt]);
+      }
+      return;
+    }
+    if (tool === "select") {
+      // Check roof edge click first (when a roof is selected)
+      if (selectedRoofId) {
+        const selRoof = roofs.find(r => r.id === selectedRoofId);
+        if (selRoof) {
+          const { points: rp } = selRoof;
+          for (let i = 0; i < rp.length; i++) {
+            const j = (i + 1) % rp.length;
+            if (distToSegment(rawPt, rp[i], rp[j]) < WALL_HOVER_THRESHOLD) {
+              setSelectedRoofEdge({ roofId: selectedRoofId, edgeIdx: i });
+              return;
+            }
+          }
+        }
+      }
+      // Check roof click
+      const hitRoof = [...roofs].reverse().find(r => pointInPoly(rawPt, r.points));
+      if (hitRoof) {
+        setSelectedRoofId(hitRoof.id); setSelectedRoofEdge(null);
+        setSelectedId(null); setSelectedOpening(null);
+        return;
+      }
+    }
     if (tool !== "draw") return;
     if (draft.length >= 3 && dist(pt, draft[0]) < closeThreshold) {
       const pal = PALETTE[rooms.length % PALETTE.length];
@@ -579,7 +766,7 @@ export default function FloorPlanUI({ projectId }) {
       recorder.record("draw_point", { pt });
       setDraft(d => [...d, pt]);
     }
-  }, [tool, snapPt, svgPt, draft, closeThreshold, rooms, setRooms, findWallHover]);
+  }, [tool, snapPt, svgPt, draft, closeThreshold, rooms, setRooms, findWallHover, roofDraft, roofs, setRoofs, selectedRoofId]);
 
   const onVertexMouseDown = useCallback((e, roomId, vIdx) => {
     if (tool !== "select") return;
@@ -596,16 +783,24 @@ export default function FloorPlanUI({ projectId }) {
   useEffect(() => {
     const fn = (e) => {
       if (e.target.tagName === "INPUT") return;
-      if (e.key === "Escape") { setDraft([]); setSelectedId(null); setSelectedOpening(null); recorder.record("key_escape"); }
+      if (e.key === "Escape") { setDraft([]); setRoofDraft([]); setSelectedId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null); recorder.record("key_escape"); }
       if (e.key === "d") { setTool("draw"); recorder.record("tool_change", { tool: "draw" }); }
-      if (e.key === "s") { setTool("select"); setDraft([]); recorder.record("tool_change", { tool: "select" }); }
+      if (e.key === "s") { setTool("select"); setDraft([]); setRoofDraft([]); recorder.record("tool_change", { tool: "select" }); }
       if (e.key === "w") { setTool("window"); recorder.record("tool_change", { tool: "window" }); }
       if (e.key === "r") { setTool("door"); recorder.record("tool_change", { tool: "door" }); }
+      if (e.key === "f") { setTool("roof"); setDraft([]); recorder.record("tool_change", { tool: "roof" }); }
       if (e.key === "Enter" && tool === "draw" && draft.length >= 3) {
         const pal = PALETTE[rooms.length % PALETTE.length];
         setRooms(rs => [...rs, newRoom(draft, rooms, pal)]);
         recorder.record("room_close", { points: [...draft], via: "enter" });
         setDraft([]);
+      }
+      if (e.key === "Enter" && tool === "roof" && roofDraft.length >= 3) {
+        const newRoof = { id: uid(), points: [...roofDraft], pitch: ROOF_DEFAULT_PITCH, edgeTypes: roofDraft.map(() => 'bottom') };
+        setRoofs(rs => [...rs, newRoof]);
+        setSelectedRoofId(newRoof.id);
+        recorder.record("roof_close", { points: [...roofDraft], via: "enter" });
+        setRoofDraft([]);
       }
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedOpening) {
@@ -616,12 +811,16 @@ export default function FloorPlanUI({ projectId }) {
         } else if (selectedId) {
           recorder.record("room_delete", { roomId: selectedId });
           setRooms(rs => rs.filter(r => r.id !== selectedId)); setSelectedId(null);
+        } else if (selectedRoofId) {
+          recorder.record("roof_delete", { roofId: selectedRoofId });
+          setRoofs(rs => rs.filter(r => r.id !== selectedRoofId));
+          setSelectedRoofId(null); setSelectedRoofEdge(null);
         }
       }
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [draft, tool, rooms, selectedId, selectedOpening, setRooms]);
+  }, [draft, roofDraft, tool, rooms, roofs, selectedId, selectedOpening, selectedRoofId, setRooms, setRoofs]);
 
   // ── Scroll zoom ──
   useEffect(() => {
@@ -686,12 +885,14 @@ export default function FloorPlanUI({ projectId }) {
     { id:"select", label:"SELECT", key:"S" },
     { id:"window", label:"WINDOW", key:"W" },
     { id:"door",   label:"DOOR",   key:"R" },
+    { id:"roof",   label:"ROOF",   key:"F" },
   ];
   const toolColors = {
     draw:   { active:"#1e4a7a", border:"#2563eb", text:"#7dd3fc" },
     select: { active:"#1e4a7a", border:"#2563eb", text:"#7dd3fc" },
     window: { active:"#0c3050", border:"#38bdf8", text:"#7dd3fc" },
     door:   { active:"#1e1040", border:"#a78bfa", text:"#c4b5fd" },
+    roof:   { active:"#3a2000", border:"#f59e0b", text:"#fde68a" },
   };
 
   // ─── Properties panel ─────────────────────────────────────────────────────
@@ -802,6 +1003,94 @@ export default function FloorPlanUI({ projectId }) {
       );
     }
 
+    // ── Roof selected ──
+    const selectedRoof = roofs.find(r => r.id === selectedRoofId);
+    if (selectedRoof) {
+      const { points: rp, pitch, edgeTypes } = selectedRoof;
+      const updatePitch = (v) => {
+        setRoofs(rs => rs.map(r => r.id === selectedRoofId ? { ...r, pitch: Math.max(1, Math.min(89, v)) } : r));
+      };
+      const toggleEdge = (i) => {
+        setRoofs(rs => rs.map(r => {
+          if (r.id !== selectedRoofId) return r;
+          const et = [...r.edgeTypes];
+          et[i] = et[i] === 'bottom' ? 'gable' : 'bottom';
+          return { ...r, edgeTypes: et };
+        }));
+      };
+      const setAllEdges = (type) => {
+        setRoofs(rs => rs.map(r => r.id !== selectedRoofId ? r : { ...r, edgeTypes: r.edgeTypes.map(() => type) }));
+      };
+      return (
+        <div>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+            <div style={{ width:8,height:8,borderRadius:"50%",background:"#f59e0b" }}/>
+            <span style={{ color:"#f59e0b", fontWeight:700, fontSize:12, letterSpacing:"0.1em" }}>ROOF</span>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom:14 }}>
+            <Stat label="EDGES"  value={`${rp.length}`}/>
+            <Stat label="AREA"   value={`${area(rp).toFixed(1)} m²`}/>
+          </div>
+
+          {/* Pitch control */}
+          <div style={{ marginBottom:14 }}>
+            <div style={{ color:"#2d5a8a", fontSize:9, letterSpacing:"0.12em", marginBottom:6 }}>ROOF PITCH</div>
+            <div style={{ display:"flex", alignItems:"center", gap:6, background:"#0a1628", border:"1px solid #3a2000", borderRadius:5, padding:"5px 8px" }}>
+              <button onClick={()=>updatePitch(pitch-1)} style={{ width:26,height:26,background:"#070d1a",border:"1px solid #f59e0b60",color:"#f59e0b",borderRadius:4,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center" }}>−</button>
+              <input type="number" min="1" max="89" step="1" value={pitch}
+                onChange={e=>{ const v=parseInt(e.target.value); if(!isNaN(v)) updatePitch(v); }}
+                style={{ flex:1,textAlign:"center",background:"transparent",border:"none",color:"#fde68a",fontSize:16,fontFamily:"monospace",outline:"none" }}/>
+              <button onClick={()=>updatePitch(pitch+1)} style={{ width:26,height:26,background:"#070d1a",border:"1px solid #f59e0b60",color:"#f59e0b",borderRadius:4,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center" }}>+</button>
+              <span style={{ color:"#f59e0b", fontSize:12, fontFamily:"monospace" }}>°</span>
+            </div>
+            <div style={{ color:"#1a3050", fontSize:8, marginTop:4, lineHeight:1.6 }}>
+              Rise: {(Math.tan(pitch*Math.PI/180)).toFixed(2)} m per 1 m run
+            </div>
+          </div>
+
+          {/* Edge types */}
+          <div style={{ color:"#2d5a8a", fontSize:9, letterSpacing:"0.12em", marginBottom:6 }}>EDGES</div>
+          <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+            <button onClick={()=>setAllEdges('bottom')} style={{ flex:1, padding:"4px 0", background:"#0a1628", border:"1px solid #f59e0b60", color:"#f59e0b", borderRadius:4, cursor:"pointer", fontSize:9, fontFamily:"monospace" }}>ALL BOTTOM</button>
+            <button onClick={()=>setAllEdges('gable')}  style={{ flex:1, padding:"4px 0", background:"#0a1628", border:"1px solid #4a7fa560", color:"#4a7fa5", borderRadius:4, cursor:"pointer", fontSize:9, fontFamily:"monospace" }}>ALL GABLE</button>
+          </div>
+          <div style={{ color:"#1a3050", fontSize:8, marginBottom:10, lineHeight:1.6 }}>
+            <span style={{ color:"#f59e0b" }}>●</span> Bottom = eave (slope rises from edge)<br/>
+            <span style={{ color:"#4a7fa5" }}>- -</span> Gable = vertical wall up to slope
+          </div>
+          {edgeTypes.map((et, i) => {
+            const j = (i+1)%rp.length;
+            const len = dist(rp[i], rp[j]);
+            const isSelEdge = selectedRoofEdge?.edgeIdx === i && selectedRoofEdge?.roofId === selectedRoofId;
+            const isBottom = et === 'bottom';
+            return (
+              <div key={i} onClick={()=>{ setSelectedRoofEdge({roofId:selectedRoofId,edgeIdx:i}); }}
+                style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 8px",marginBottom:3,
+                  background: isSelEdge ? "#2a1a00" : "#0a1628",
+                  border: `1px solid ${isSelEdge ? "#f59e0b" : "#132040"}`,
+                  borderRadius:3, cursor:"pointer" }}>
+                <span style={{ color: isSelEdge ? "#fde68a" : "#4a7fa5", fontSize:9 }}>
+                  Edge {i+1} <span style={{ color:"#1e3a6b", fontSize:8 }}>{len.toFixed(1)}m</span>
+                </span>
+                <button onClick={e=>{e.stopPropagation();toggleEdge(i);}}
+                  style={{ padding:"2px 8px", fontSize:9, fontFamily:"monospace", borderRadius:3, cursor:"pointer",
+                    background: isBottom ? "#f59e0b20" : "#0a1628",
+                    border: `1px solid ${isBottom ? "#f59e0b" : "#4a7fa5"}`,
+                    color: isBottom ? "#f59e0b" : "#4a7fa5" }}>
+                  {isBottom ? "BOTTOM" : "GABLE"}
+                </button>
+              </div>
+            );
+          })}
+
+          <button onClick={()=>{ setRoofs(rs=>rs.filter(r=>r.id!==selectedRoofId)); setSelectedRoofId(null); setSelectedRoofEdge(null); }}
+            style={{ width:"100%",padding:"6px",background:"#200a0a",border:"1px solid #7f1d1d",color:"#f87171",borderRadius:3,cursor:"pointer",fontSize:11,fontFamily:"monospace",marginTop:14 }}>
+            DELETE ROOF
+          </button>
+        </div>
+      );
+    }
+
     // ── Room selected ──
     if (selectedRoom) {
       const openings = selectedRoom.openings || [];
@@ -902,7 +1191,7 @@ export default function FloorPlanUI({ projectId }) {
     }
 
     // ── Nothing selected ──
-    const hints = { draw:"Click to place vertices.\nClick near start to close.\nPress Enter to close.", select:"Click a room or opening\nto select and edit it.\nDrag vertices to reshape.", window:"Click on any wall\nto place a window.", door:"Click on any wall\nto place a door." };
+    const hints = { draw:"Click to place vertices.\nClick near start to close.\nPress Enter to close.", select:"Click a room or opening\nto select and edit it.\nDrag vertices to reshape.", window:"Click on any wall\nto place a window.", door:"Click on any wall\nto place a door.", roof:"Click to place roof vertices.\nClick near start (or Enter) to close.\nThen select edges to set type." };
     return (
       <div>
         <div style={{ background:"#0a1628",border:"1px solid #132040",borderRadius:4,padding:"10px",marginBottom:14,color:"#2d5a8a",fontSize:10,lineHeight:1.8,whiteSpace:"pre-line" }}>
@@ -934,7 +1223,7 @@ export default function FloorPlanUI({ projectId }) {
           </div>
         )}
         <div style={{ marginTop:20,color:"#2d5a8a",fontSize:9,letterSpacing:"0.12em",marginBottom:8 }}>SHORTCUTS</div>
-        {[["D","Draw"],["S","Select"],["W","Window"],["R","Door"],["Enter","Close room"],["Esc","Cancel"],["Del","Delete"]].map(([k,v])=>(
+        {[["D","Draw"],["S","Select"],["W","Window"],["R","Door"],["F","Roof"],["Enter","Close polygon"],["Esc","Cancel"],["Del","Delete"]].map(([k,v])=>(
           <div key={k} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"3px 0",borderBottom:"1px solid #0a1628" }}>
             <span style={{ color:"#1e3a6b",background:"#0a1628",padding:"1px 5px",borderRadius:2,border:"1px solid #132040",fontSize:9 }}>{k}</span>
             <span style={{ color:"#2d5a8a",fontSize:9 }}>{v}</span>
@@ -948,6 +1237,7 @@ export default function FloorPlanUI({ projectId }) {
   const replaySetters = {
     setRoomsByStorey, setCeilingHeights, setGlobalU, setBuildingRotation,
     setSelectedId, setSelectedOpening, setDraft, setActiveStorey,
+    setRoofsByStorey,
   };
 
   return (
@@ -959,7 +1249,7 @@ export default function FloorPlanUI({ projectId }) {
         <div style={{ width:1,height:20,background:"#132040" }}/>
         {tools.map(({ id, label, key }) => {
           const tc=toolColors[id], isActive=tool===id;
-          return <button key={id} onClick={()=>{ recorder.record("tool_change", { tool: id }); setTool(id); if(id!=="draw")setDraft([]); }} style={{ padding:"5px 10px",background:isActive?tc.active:"transparent",color:isActive?tc.text:"#2d5a8a",border:`1px solid ${isActive?tc.border:"#132040"}`,borderRadius:5,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.07em",transition:"all 0.15s",display:"flex",alignItems:"center",gap:5 }}>{label}<span style={{opacity:0.4,fontSize:8}}>[{key}]</span></button>;
+          return <button key={id} onClick={()=>{ recorder.record("tool_change", { tool: id }); setTool(id); if(id!=="draw")setDraft([]); if(id!=="roof")setRoofDraft([]); }} style={{ padding:"5px 10px",background:isActive?tc.active:"transparent",color:isActive?tc.text:"#2d5a8a",border:`1px solid ${isActive?tc.border:"#132040"}`,borderRadius:5,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.07em",transition:"all 0.15s",display:"flex",alignItems:"center",gap:5 }}>{label}<span style={{opacity:0.4,fontSize:8}}>[{key}]</span></button>;
         })}
         <div style={{ width:1,height:20,background:"#132040" }}/>
         <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,cursor:"pointer",color:"#2d5a8a",userSelect:"none" }}>
@@ -984,7 +1274,7 @@ export default function FloorPlanUI({ projectId }) {
         <div style={{ position:"absolute", top:10, right:10, zIndex:10, pointerEvents:"none" }}>
           <NorthOverlay rotation={buildingRotation} />
         </div>
-        <svg ref={svgRef} style={{ width:"100%",height:"100%",display:"block",cursor:(tool==="draw"||tool==="window"||tool==="door")?"crosshair":"default" }}
+        <svg ref={svgRef} style={{ width:"100%",height:"100%",display:"block",cursor:(tool==="draw"||tool==="window"||tool==="door"||tool==="roof")?"crosshair":"default" }}
           onMouseMove={onMouseMove} onMouseDown={onMouseDown} onMouseUp={onMouseUp} onClick={onCanvasClick}>
           <g transform={`translate(${pan.x},${pan.y}) scale(${zoom*PPM})`}>
             {renderGrid()}
@@ -1027,6 +1317,49 @@ export default function FloorPlanUI({ projectId }) {
               );
             })}
 
+            {/* Roofs */}
+            {roofs.map(roof => {
+              const rp = roof.points;
+              if (rp.length < 3) return null;
+              const pathD = rp.map((p,i) => `${i?"L":"M"} ${p.x} ${p.y}`).join(" ") + " Z";
+              const isSel = selectedRoofId === roof.id;
+              const ridgeLines = (isSel || roofs.length > 0) ? computeRoofLines(rp, roof.edgeTypes) : [];
+              return (
+                <g key={roof.id} onClick={e => { if(tool==="select"||tool==="roof"){e.stopPropagation();setSelectedRoofId(roof.id);setSelectedRoofEdge(null);setSelectedId(null);setSelectedOpening(null);} }}>
+                  {/* Ridge/hip lines — faint */}
+                  {ridgeLines.map((seg, si) => (
+                    <line key={si} x1={seg.x1} y1={seg.y1} x2={seg.x2} y2={seg.y2}
+                      stroke="#f59e0b" strokeWidth={lw * 1.2} opacity={0.25}
+                      strokeDasharray={`${0.12} ${0.06}`} strokeLinecap="round" />
+                  ))}
+                  {/* Roof polygon fill */}
+                  <path d={pathD} fill={isSel ? "#f59e0b18" : "#f59e0b0a"}
+                    style={{ cursor: tool==="select"||tool==="roof" ? "pointer" : "crosshair" }} />
+                  {/* Edges — bottom=solid, gable=dashed */}
+                  {rp.map((p, i) => {
+                    const j = (i+1)%rp.length;
+                    const q = rp[j];
+                    const et = roof.edgeTypes[i] || 'bottom';
+                    const isSelEdge = selectedRoofEdge?.roofId === roof.id && selectedRoofEdge?.edgeIdx === i;
+                    const col = isSelEdge ? "#fde68a" : (isSel ? "#f59e0b" : "#b45309");
+                    const lwidth = isSelEdge ? lw*4 : (isSel ? lw*3 : lw*2);
+                    return (
+                      <line key={i} x1={p.x} y1={p.y} x2={q.x} y2={q.y}
+                        stroke={col} strokeWidth={lwidth}
+                        strokeDasharray={et==="gable" ? `${0.15} ${0.1}` : "none"}
+                        strokeLinecap="round" />
+                    );
+                  })}
+                  {/* Pitch label at centroid */}
+                  {isSel && (() => {
+                    const c = centroid(rp);
+                    const fs = 11/(zoom*PPM);
+                    return <text x={c.x} y={c.y} fontSize={fs} fill="#f59e0b" textAnchor="middle" dominantBaseline="middle" opacity={0.85} style={{userSelect:"none",pointerEvents:"none",fontFamily:"monospace"}}>{roof.pitch}°</text>;
+                  })()}
+                </g>
+              );
+            })}
+
             {/* Wall hover */}
             {wallHover&&(()=>{ const room=rooms.find(r=>r.id===wallHover.roomId); if(!room)return null;
               const pts=room.points,ptA=pts[wallHover.wallIdx],ptB=pts[(wallHover.wallIdx+1)%pts.length];
@@ -1045,8 +1378,21 @@ export default function FloorPlanUI({ projectId }) {
                 <circle cx={cursor.x} cy={cursor.y} r={3/(zoom*PPM)} fill="#38bdf8" opacity={0.8}/>
               </g>; })()}
 
+            {/* Roof draft */}
+            {tool==="roof"&&roofDraft.length>0&&(()=>{
+              const nearClose=roofDraft.length>=3&&dist(cursor,roofDraft[0])<closeThreshold;
+              return <g>
+                {roofDraft.map((p,i)=>i===0?null:<line key={i} x1={roofDraft[i-1].x} y1={roofDraft[i-1].y} x2={p.x} y2={p.y} stroke="#f59e0b" strokeWidth={lw*2.5} strokeLinecap="round"/>)}
+                <line x1={roofDraft[roofDraft.length-1].x} y1={roofDraft[roofDraft.length-1].y} x2={cursor.x} y2={cursor.y} stroke="#f59e0b" strokeWidth={lw} opacity={0.5} strokeDasharray={`${0.1} ${0.07}`}/>
+                {nearClose&&<circle cx={roofDraft[0].x} cy={roofDraft[0].y} r={9/(zoom*PPM)} fill="#f59e0b20" stroke="#f59e0b" strokeWidth={lw*1.5}/>}
+                {roofDraft.map((p,i)=><circle key={i} cx={p.x} cy={p.y} r={i===0?6/(zoom*PPM):4/(zoom*PPM)} fill={i===0?"#f59e0b":"#3a2000"} stroke="#f59e0b" strokeWidth={lw}/>)}
+                <circle cx={cursor.x} cy={cursor.y} r={3/(zoom*PPM)} fill="#f59e0b" opacity={0.8}/>
+              </g>;
+            })()}
+
             {tool==="draw"&&draft.length===0&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill="#38bdf8" opacity={0.5}/>}
             {(tool==="window"||tool==="door")&&!wallHover&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill={tool==="window"?"#38bdf8":"#a78bfa"} opacity={0.5}/>}
+            {tool==="roof"&&roofDraft.length===0&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill="#f59e0b" opacity={0.5}/>}
           </g>
         </svg>
         </div>{/* end canvas wrapper */}
@@ -1122,7 +1468,7 @@ export default function FloorPlanUI({ projectId }) {
       <div style={{ display:"flex",alignItems:"center",background:"#070d1a",borderTop:"1px solid #132040",padding:"0 12px",height:44,flexShrink:0,gap:4 }}>
         <span style={{ color:"#1e3a6b",fontSize:9,marginRight:4,letterSpacing:"0.15em",flexShrink:0 }}>STOREY</span>
         {STOREY_LABELS.map((label,i)=>{ const isActive=activeStorey===i;
-          return <button key={i} onClick={()=>{ recorder.record("storey_change", { storey: i }); setActiveStorey(i); setSelectedId(null); setSelectedOpening(null); setDraft([]); }} style={{ padding:"4px 10px",height:32,background:isActive?"#1e4a7a":"#0a1628",color:isActive?"#7dd3fc":"#2d5a8a",border:`1px solid ${isActive?"#2563eb":"#132040"}`,borderRadius:6,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.06em",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",lineHeight:1.2,transition:"all 0.15s",flexShrink:0 }}>
+          return <button key={i} onClick={()=>{ recorder.record("storey_change", { storey: i }); setActiveStorey(i); setSelectedId(null); setSelectedOpening(null); setDraft([]); setSelectedRoofId(null); setSelectedRoofEdge(null); setRoofDraft([]); }} style={{ padding:"4px 10px",height:32,background:isActive?"#1e4a7a":"#0a1628",color:isActive?"#7dd3fc":"#2d5a8a",border:`1px solid ${isActive?"#2563eb":"#132040"}`,borderRadius:6,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.06em",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",lineHeight:1.2,transition:"all 0.15s",flexShrink:0 }}>
             <span>{label.toUpperCase()}</span>
             <span style={{ fontSize:7,opacity:0.6,color:isActive?"#38bdf8":"#1e3a6b" }}>{ceilingHeights[i].toFixed(1)}m</span>
           </button>; })}

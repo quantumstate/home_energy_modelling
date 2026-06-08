@@ -2,6 +2,133 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { buildingModelFromState, processBuilding } from "./geometryProcessor.js";
 
+// Load roof data written by FloorPlanUI.
+const loadRoofsByStorey = (projectId) => {
+  try {
+    const raw = localStorage.getItem(`${projectId}_floorplan_roofs`);
+    return raw ? JSON.parse(raw) : { 0: [], 1: [], 2: [] };
+  } catch { return { 0: [], 1: [], 2: [] }; }
+};
+
+// Build Three.js mesh(es) for one roof polygon using a height-field approach.
+// Height at any interior point = distance_to_nearest_bottom_edge * tan(pitch).
+// This naturally produces sharp ridge/hip lines matching the straight skeleton.
+//
+// Also builds gable walls (vertical triangular fills between ceiling and slope).
+//
+// baseY  = world Y of the ceiling this roof sits on (= floorElev + ceilingHeight)
+function addRoofToScene(roofPoints, edgeTypes, pitch, baseY, scene) {
+  const n = roofPoints.length;
+  if (n < 3) return;
+  const tanP = Math.tan(pitch * Math.PI / 180);
+
+  const bottomEdges = roofPoints
+    .map((p, i) => edgeTypes[i] === 'bottom' ? { a: p, b: roofPoints[(i + 1) % n] } : null)
+    .filter(Boolean);
+  if (bottomEdges.length === 0) return;
+
+  // Perpendicular distance from floor-plan point (px, pz) to nearest bottom edge
+  const distToBottom = (px, pz) => {
+    let minD = Infinity;
+    for (const { a, b } of bottomEdges) {
+      const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
+      const t = len2 < 1e-10 ? 0 : Math.max(0, Math.min(1, ((px - a.x) * dx + (pz - a.y) * dy) / len2));
+      minD = Math.min(minD, Math.hypot(px - (a.x + t * dx), pz - (a.y + t * dy)));
+    }
+    return minD;
+  };
+
+  const heightAt = (px, pz) => distToBottom(px, pz) * tanP;
+
+  const isInside = (px, pz) => {
+    let inside = false;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = roofPoints[i].x, yi = roofPoints[i].y;
+      const xj = roofPoints[j].x, yj = roofPoints[j].y;
+      if (((yi > pz) !== (yj > pz)) && px < (xj - xi) * (pz - yi) / (yj - yi) + xi)
+        inside = !inside;
+    }
+    return inside;
+  };
+
+  // ── Height-field grid for sloping roof surface ────────────────────────────
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const p of roofPoints) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minZ) minZ = p.y; if (p.y > maxZ) maxZ = p.y;
+  }
+
+  const step = 0.15;
+  const gW = Math.ceil((maxX - minX) / step) + 2;
+  const gH = Math.ceil((maxZ - minZ) / step) + 2;
+
+  const idxGrid = new Int32Array(gW * gH).fill(-1);
+  const posArr = [];
+
+  for (let iz = 0; iz < gH; iz++) {
+    const pz = minZ + iz * step;
+    for (let ix = 0; ix < gW; ix++) {
+      const px = minX + ix * step;
+      if (isInside(px, pz)) {
+        idxGrid[iz * gW + ix] = posArr.length / 3;
+        posArr.push(px, baseY + heightAt(px, pz), pz);
+      }
+    }
+  }
+
+  const triIdx = [];
+  for (let iz = 0; iz < gH - 1; iz++) {
+    for (let ix = 0; ix < gW - 1; ix++) {
+      const i00 = idxGrid[iz * gW + ix],      i10 = idxGrid[iz * gW + ix + 1];
+      const i01 = idxGrid[(iz + 1) * gW + ix], i11 = idxGrid[(iz + 1) * gW + ix + 1];
+      if (i00 >= 0 && i10 >= 0 && i01 >= 0) triIdx.push(i00, i10, i01);
+      if (i10 >= 0 && i11 >= 0 && i01 >= 0) triIdx.push(i10, i11, i01);
+    }
+  }
+
+  if (triIdx.length > 0) {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3));
+    geom.setIndex(triIdx);
+    geom.computeVertexNormals();
+    const mesh = new THREE.Mesh(geom, new THREE.MeshPhongMaterial({
+      color: 0x8b4513, shininess: 15, side: THREE.DoubleSide,
+    }));
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+  }
+
+  // ── Gable walls (vertical fill from ceiling up to roof slope) ────────────
+  for (let i = 0; i < n; i++) {
+    if (edgeTypes[i] !== 'gable') continue;
+    const pa = roofPoints[i], pb = roofPoints[(i + 1) % n];
+    const NSAMP = 20;
+    const wPos = [];
+    for (let j = 0; j <= NSAMP; j++) {
+      const t = j / NSAMP;
+      const px = pa.x + t * (pb.x - pa.x), pz = pa.y + t * (pb.y - pa.y);
+      const h = heightAt(px, pz);
+      wPos.push(px, baseY, pz);             // lower (ceiling level)
+      wPos.push(px, baseY + h, pz);         // upper (roof slope)
+    }
+    const wTri = [];
+    for (let j = 0; j < NSAMP; j++) {
+      const a = j * 2, b = j * 2 + 1, c = j * 2 + 2, d = j * 2 + 3;
+      wTri.push(a, c, b, b, c, d);
+    }
+    const wGeom = new THREE.BufferGeometry();
+    wGeom.setAttribute('position', new THREE.Float32BufferAttribute(wPos, 3));
+    wGeom.setIndex(wTri);
+    wGeom.computeVertexNormals();
+    const wMesh = new THREE.Mesh(wGeom, new THREE.MeshPhongMaterial({
+      color: 0xdddddd, side: THREE.DoubleSide,
+    }));
+    wMesh.castShadow = true;
+    scene.add(wMesh);
+  }
+}
+
 // Load and process the BuildingModel written by FloorPlanUI.
 const loadProcessedBuilding = (projectId) => {
   const pk = (key) => `${projectId}_${key}`;
@@ -154,6 +281,7 @@ export default function ThreeDView({ projectId }) {
     }
 
     const processedBuilding = loadProcessedBuilding(projectId);
+    const roofsByStorey = loadRoofsByStorey(projectId);
 
     if (!processedBuilding || processedBuilding.rooms.length === 0) {
       setInfo("No rooms in floor plan. Draw rooms in the Floor Plan tab first.");
@@ -267,6 +395,16 @@ export default function ThreeDView({ projectId }) {
       ceilingMesh.rotation.x = Math.PI / 2;
       ceilingMesh.position.y = zOffset + ceilingHeight;
       scene.add(ceilingMesh);
+    });
+
+    // Add roofs for each storey
+    processedBuilding.source.storeys.forEach((storey, si) => {
+      const baseY = storey.floorElevation;
+      const storeyRoofs = roofsByStorey[si] || [];
+      for (const roof of storeyRoofs) {
+        if (!roof.points || roof.points.length < 3) continue;
+        addRoofToScene(roof.points, roof.edgeTypes || roof.points.map(() => 'bottom'), roof.pitch ?? 35, baseY, scene);
+      }
     });
 
     // Handle window resize
