@@ -2,6 +2,27 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { buildingModelFromState, processBuilding } from "./geometryProcessor.js";
 
+function offsetPolygon(points, distance) {
+  const n = points.length;
+  if (n < 3 || Math.abs(distance) < 1e-10) return points;
+  const cen = { x: points.reduce((s,p)=>s+p.x,0)/n, y: points.reduce((s,p)=>s+p.y,0)/n };
+  const outNorm = (a, b) => {
+    const dx = b.x-a.x, dy = b.y-a.y, len = Math.sqrt(dx*dx+dy*dy);
+    if (len < 1e-10) return {x:0,y:0};
+    let nx = dy/len, ny = -dx/len;
+    const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+    if ((cen.x-mx)*nx+(cen.y-my)*ny > 0) { nx=-nx; ny=-ny; }
+    return {x:nx, y:ny};
+  };
+  const norms = points.map((p,i) => outNorm(p, points[(i+1)%n]));
+  return points.map((p, i) => {
+    const n1 = norms[(i-1+n)%n], n2 = norms[i];
+    const denom = 1 + n1.x*n2.x + n1.y*n2.y;
+    if (Math.abs(denom) < 1e-10) return { x: p.x+n2.x*distance, y: p.y+n2.y*distance };
+    return { x: p.x+(n1.x+n2.x)/denom*distance, y: p.y+(n1.y+n2.y)/denom*distance };
+  });
+}
+
 // Load roof data written by FloorPlanUI.
 const loadRoofsByStorey = (projectId) => {
   try {
@@ -403,7 +424,8 @@ export default function ThreeDView({ projectId }) {
       const storeyRoofs = roofsByStorey[si] || [];
       for (const roof of storeyRoofs) {
         if (!roof.points || roof.points.length < 3) continue;
-        addRoofToScene(roof.points, roof.edgeTypes || roof.points.map(() => 'bottom'), roof.pitch ?? 35, baseY, scene);
+        const pts = offsetPolygon(roof.points, roof.overhang ?? 0);
+        addRoofToScene(pts, roof.edgeTypes || roof.points.map(() => 'bottom'), roof.pitch ?? 35, baseY, scene);
       }
     });
 

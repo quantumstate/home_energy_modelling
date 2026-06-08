@@ -60,6 +60,29 @@ const projectOntoWall = (pt, a, b) => {
 let _uid = 0;
 const uid = () => `id${++_uid}`;
 
+// Expand (or contract) a polygon by moving each vertex along its outward bisector.
+// distance > 0 = outward (overhang), distance < 0 = inward.
+function offsetPolygon(points, distance) {
+  const n = points.length;
+  if (n < 3 || Math.abs(distance) < 1e-10) return points;
+  const cen = { x: points.reduce((s,p)=>s+p.x,0)/n, y: points.reduce((s,p)=>s+p.y,0)/n };
+  const outNorm = (a, b) => {
+    const dx = b.x-a.x, dy = b.y-a.y, len = Math.sqrt(dx*dx+dy*dy);
+    if (len < 1e-10) return {x:0,y:0};
+    let nx = dy/len, ny = -dx/len;
+    const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+    if ((cen.x-mx)*nx+(cen.y-my)*ny > 0) { nx=-nx; ny=-ny; }
+    return {x:nx, y:ny};
+  };
+  const norms = points.map((p,i) => outNorm(p, points[(i+1)%n]));
+  return points.map((p, i) => {
+    const n1 = norms[(i-1+n)%n], n2 = norms[i];
+    const denom = 1 + n1.x*n2.x + n1.y*n2.y;
+    if (Math.abs(denom) < 1e-10) return { x: p.x+n2.x*distance, y: p.y+n2.y*distance };
+    return { x: p.x+(n1.x+n2.x)/denom*distance, y: p.y+(n1.y+n2.y)/denom*distance };
+  });
+}
+
 // ─── Roof geometry ────────────────────────────────────────────────────────────
 // Straight-skeleton algorithm for ridge/hip line computation.
 // Only vertices where BOTH flanking edges are "bottom" (active) trace ridge paths.
@@ -720,6 +743,7 @@ export default function FloorPlanUI({ projectId }) {
           id: uid(),
           points: [...roofDraft],
           pitch: ROOF_DEFAULT_PITCH,
+          overhang: 0,
           edgeTypes: roofDraft.map(() => 'bottom'),
         };
         setRoofs(rs => [...rs, newRoof]);
@@ -796,7 +820,7 @@ export default function FloorPlanUI({ projectId }) {
         setDraft([]);
       }
       if (e.key === "Enter" && tool === "roof" && roofDraft.length >= 3) {
-        const newRoof = { id: uid(), points: [...roofDraft], pitch: ROOF_DEFAULT_PITCH, edgeTypes: roofDraft.map(() => 'bottom') };
+        const newRoof = { id: uid(), points: [...roofDraft], pitch: ROOF_DEFAULT_PITCH, overhang: 0, edgeTypes: roofDraft.map(() => 'bottom') };
         setRoofs(rs => [...rs, newRoof]);
         setSelectedRoofId(newRoof.id);
         recorder.record("roof_close", { points: [...roofDraft], via: "enter" });
@@ -1006,7 +1030,7 @@ export default function FloorPlanUI({ projectId }) {
     // ── Roof selected ──
     const selectedRoof = roofs.find(r => r.id === selectedRoofId);
     if (selectedRoof) {
-      const { points: rp, pitch, edgeTypes } = selectedRoof;
+      const { points: rp, pitch, overhang = 0, edgeTypes } = selectedRoof;
       const updatePitch = (v) => {
         setRoofs(rs => rs.map(r => r.id === selectedRoofId ? { ...r, pitch: Math.max(1, Math.min(89, v)) } : r));
       };
@@ -1045,6 +1069,21 @@ export default function FloorPlanUI({ projectId }) {
             </div>
             <div style={{ color:"#1a3050", fontSize:8, marginTop:4, lineHeight:1.6 }}>
               Rise: {(Math.tan(pitch*Math.PI/180)).toFixed(2)} m per 1 m run
+            </div>
+          </div>
+
+          {/* Overhang control */}
+          <div style={{ marginBottom:14 }}>
+            <div style={{ color:"#2d5a8a", fontSize:9, letterSpacing:"0.12em", marginBottom:6 }}>OVERHANG</div>
+            <div style={{ display:"flex", alignItems:"center", gap:6, background:"#0a1628", border:"1px solid #3a2000", borderRadius:5, padding:"5px 8px" }}>
+              <button onClick={()=>setRoofs(rs=>rs.map(r=>r.id===selectedRoofId?{...r,overhang:Math.max(0,Math.round((overhang-0.05)*100)/100)}:r))}
+                style={{ width:26,height:26,background:"#070d1a",border:"1px solid #f59e0b60",color:"#f59e0b",borderRadius:4,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center" }}>−</button>
+              <input type="number" min="0" max="2" step="0.05" value={overhang.toFixed(2)}
+                onChange={e=>{ const v=parseFloat(e.target.value); if(!isNaN(v)) setRoofs(rs=>rs.map(r=>r.id===selectedRoofId?{...r,overhang:Math.max(0,v)}:r)); }}
+                style={{ flex:1,textAlign:"center",background:"transparent",border:"none",color:"#fde68a",fontSize:16,fontFamily:"monospace",outline:"none" }}/>
+              <button onClick={()=>setRoofs(rs=>rs.map(r=>r.id===selectedRoofId?{...r,overhang:Math.round((overhang+0.05)*100)/100}:r))}
+                style={{ width:26,height:26,background:"#070d1a",border:"1px solid #f59e0b60",color:"#f59e0b",borderRadius:4,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center" }}>+</button>
+              <span style={{ color:"#f59e0b", fontSize:12, fontFamily:"monospace" }}>m</span>
             </div>
           </div>
 
@@ -1319,11 +1358,11 @@ export default function FloorPlanUI({ projectId }) {
 
             {/* Roofs */}
             {roofs.map(roof => {
-              const rp = roof.points;
-              if (rp.length < 3) return null;
+              if (roof.points.length < 3) return null;
+              const rp = offsetPolygon(roof.points, roof.overhang ?? 0);
               const pathD = rp.map((p,i) => `${i?"L":"M"} ${p.x} ${p.y}`).join(" ") + " Z";
               const isSel = selectedRoofId === roof.id;
-              const ridgeLines = (isSel || roofs.length > 0) ? computeRoofLines(rp, roof.edgeTypes) : [];
+              const ridgeLines = computeRoofLines(rp, roof.edgeTypes);
               return (
                 <g key={roof.id} onClick={e => { if(tool==="select"||tool==="roof"){e.stopPropagation();setSelectedRoofId(roof.id);setSelectedRoofEdge(null);setSelectedId(null);setSelectedOpening(null);} }}>
                   {/* Ridge/hip lines — faint */}
