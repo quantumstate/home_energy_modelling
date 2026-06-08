@@ -3,6 +3,7 @@ import FloorPlanUI from "./FloorPlanUI.jsx";
 import ThreeDView from "./ThreeDView.jsx";
 import UValueCalculator from "./UValueCalculator.jsx";
 import HeatSummary from "./HeatSummary.jsx";
+import SolarTab from "./SolarTab.jsx";
 import ProjectManager from "./ProjectManager.jsx";
 
 const TABS = [
@@ -10,6 +11,7 @@ const TABS = [
   { id: "3d-view", label: "3d view" },
   { id: "u-value-calculator", label: "u value calculator" },
   { id: "heat-summary", label: "heat summary" },
+  { id: "solar", label: "solar" },
 ];
 
 function App() {
@@ -111,6 +113,7 @@ function App() {
         {activeTab === "3d-view" && <ThreeDView projectId={currentProject.id} />}
         {activeTab === "u-value-calculator" && <UValueCalculator projectId={currentProject.id} />}
         {activeTab === "heat-summary" && <HeatSummary projectId={currentProject.id} />}
+        {activeTab === "solar" && <SolarTab projectId={currentProject.id} />}
       </main>
     </div>
   );
