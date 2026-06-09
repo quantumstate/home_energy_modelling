@@ -586,6 +586,36 @@ function MetricRow({ label, value, unit }) {
 }
 
 const STOREY_LABELS = ["Ground floor", "First floor", "Second floor", "Third floor"];
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+// Small monthly bar chart. `values` is a 12-element array.
+function MonthlyChart({ values, color = "#22c55e", unit = "", height = 70 }) {
+  const max = Math.max(...values, 0);
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height, marginBottom: 4 }}>
+        {values.map((v, i) => (
+          <div key={i} title={`${MONTHS[i]}: ${v.toFixed(0)} ${unit}`}
+            style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+            <span style={{ fontSize: 6.5, color: "#4a7fa5", fontFamily: "monospace", marginBottom: 2 }}>
+              {max > 0 ? v.toFixed(0) : ""}
+            </span>
+            <div style={{
+              width: "100%", background: color,
+              height: max > 0 ? `${Math.max(1, (v / max) * (height - 14))}px` : 0,
+              borderRadius: "2px 2px 0 0", opacity: 0.85,
+            }} />
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 3 }}>
+        {MONTHS.map((m, i) => (
+          <div key={i} style={{ flex: 1, textAlign: "center", fontSize: 7, color: "#1a3050", fontFamily: "monospace" }}>{m[0]}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
@@ -659,6 +689,42 @@ export default function SolarTab({ projectId }) {
     const edgeTypes = roof.edgeTypes || pts.map(() => 'bottom');
     return computePanelLayout(pts, edgeIdx, edgeTypes, roof.pitch ?? 35, panelConfig);
   }, [selectedPlane, roofsByStorey, panelConfig]);
+
+  // Predicted panel count for every plane (drives the whole-roof summary)
+  const planePanelCounts = useMemo(() => {
+    const map = {};
+    for (const p of planes) {
+      const [si, roofId, edgeIdxStr] = p.key.split(':');
+      const roofs = roofsByStorey[parseInt(si)] || [];
+      const roof = roofs.find(r => r.id === roofId);
+      if (!roof?.points?.length) { map[p.key] = 0; continue; }
+      const edgeIdx = parseInt(edgeIdxStr);
+      const pts = offsetPolygon(roof.points, roof.overhang ?? 0);
+      const edgeTypes = roof.edgeTypes || pts.map(() => 'bottom');
+      const layout = computePanelLayout(pts, edgeIdx, edgeTypes, roof.pitch ?? 35, panelConfig);
+      map[p.key] = layout ? layout.panels.length : 0;
+    }
+    return map;
+  }, [planes, roofsByStorey, panelConfig]);
+
+  // Whole-roof aggregate: total panels, capacity and monthly generation.
+  const roofSummary = useMemo(() => {
+    const eff = efficiency / 100, pr = perfRatio / 100;
+    const panelSlopeArea = panelConfig.w * panelConfig.h; // m² per panel (slope)
+    const monthly = new Array(12).fill(0);
+    const perPlane = [];
+    let totalPanels = 0, totalKwp = 0, totalSlopeArea = 0, totalAnnual = 0;
+    for (const p of planes) {
+      const count = planePanelCounts[p.key] ?? 0;
+      const slopeArea = count * panelSlopeArea;
+      const kwp = slopeArea * eff;
+      const annual = kwp * p.annualIrradiation * pr;
+      p.monthlyIrradiation.forEach((irr, m) => { monthly[m] += kwp * irr * pr; });
+      totalPanels += count; totalKwp += kwp; totalSlopeArea += slopeArea; totalAnnual += annual;
+      perPlane.push({ key: p.key, label: p.planeLabel, roofLabel: p.roofLabel, count, kwp, annual });
+    }
+    return { totalPanels, totalKwp, totalSlopeArea, totalAnnual, monthly, perPlane };
+  }, [planes, planePanelCounts, efficiency, perfRatio, panelConfig]);
 
   if (planes.length === 0) {
     return (
@@ -742,12 +808,54 @@ export default function SolarTab({ projectId }) {
           ))}
         </div>
 
+        {/* Whole-roof predicted generation summary */}
+        <div style={{ background: "#070d1a", border: "1px solid #1e4a1e", borderRadius: 6, padding: "14px 16px", marginBottom: 16, maxWidth: 480 }}>
+          <SectionHeader label="WHOLE ROOF — PREDICTED GENERATION" />
+          <MetricRow label="Total panels"        value={roofSummary.totalPanels} />
+          <MetricRow label="Total panel area"     value={roofSummary.totalSlopeArea.toFixed(1)} unit="m²" />
+          <MetricRow label="Installed capacity"   value={roofSummary.totalKwp.toFixed(2)} unit="kWp" />
+          <MetricRow label="Est. annual generation" value={roofSummary.totalAnnual.toFixed(0)} unit="kWh/yr" />
+
+          <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.1em", margin: "14px 0 8px" }}>
+            MONTHLY GENERATION (kWh)
+          </div>
+          {roofSummary.totalPanels > 0 ? (
+            <MonthlyChart values={roofSummary.monthly} color="#22c55e" unit="kWh" height={78} />
+          ) : (
+            <div style={{ color: "#1a3050", fontSize: 10, textAlign: "center", padding: "8px 0" }}>
+              No panels fit on any plane with the current settings.
+            </div>
+          )}
+
+          {/* Per-plane breakdown */}
+          {roofSummary.totalPanels > 0 && (
+            <div style={{ marginTop: 14, borderTop: "1px solid #0a1628", paddingTop: 10 }}>
+              <div style={{ color: "#2d5a8a", fontSize: 9, letterSpacing: "0.1em", marginBottom: 6 }}>BY PLANE</div>
+              {roofSummary.perPlane.filter(pp => pp.count > 0).map(pp => (
+                <button key={pp.key}
+                  onClick={() => setSelectedKey(pp.key === selectedKey ? null : pp.key)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8, width: "100%",
+                    background: "none", border: "none", cursor: "pointer",
+                    padding: "4px 0", textAlign: "left",
+                  }}>
+                  <span style={{ width: 9, height: 9, borderRadius: 2, flexShrink: 0, background: planeColorMap[pp.key] }} />
+                  <span style={{ flex: 1, color: pp.key === selectedKey ? "#c8d8f0" : "#4a7fa5", fontSize: 10 }}>
+                    {pp.roofLabel ? `${pp.roofLabel} · ` : ""}{pp.label}
+                  </span>
+                  <span style={{ color: "#4a7fa5", fontSize: 10, fontFamily: "monospace" }}>{pp.count} panels</span>
+                  <span style={{ color: "#c8d8f0", fontSize: 10, fontFamily: "monospace", minWidth: 64, textAlign: "right" }}>{pp.annual.toFixed(0)} kWh</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         {selectedPlane ? (() => {
           const eff = efficiency / 100;
           const pr  = perfRatio / 100;
           const annualOutput = selectedPlane.annualIrradiation * eff * pr; // kWh/m²/yr
           const totalOutput  = annualOutput * selectedPlane.slopeArea;     // kWh/yr
-          const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
           const maxMonthly = Math.max(...selectedPlane.monthlyIrradiation);
           return (
             <div style={{ maxWidth: 480 }}>
