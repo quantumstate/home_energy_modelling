@@ -121,19 +121,21 @@ function computePanelLayout(pts, edgeIdx, edgeTypes, pitch, config) {
     y: a.y + u * eu.y + v * ev.y,
   });
 
-  // Bounding box of the full polygon in local coords
+  // Bounding box of the full polygon in local coords (sampling bounds)
   const localPts = pts.map(p => toLocal(p.x, p.y));
   const uMin = Math.min(...localPts.map(p => p.u));
   const uMax = Math.max(...localPts.map(p => p.u));
   const vMin = Math.min(...localPts.map(p => p.v));
   const vMax = Math.max(...localPts.map(p => p.v));
 
-  // Project slope measurements to plan
+  // Panel dims / clearances. The local (u,v) frame is orthonormal in world
+  // (plan) space, so u, v and clearance are all plan-space metres. Only the
+  // panel's along-slope extent and the inter-row gap are foreshortened by cosP.
   const cosP = Math.cos(pitch * Math.PI / 180);
-  const pH = panelH * cosP;    // panel height in plan
-  const cV = clearance * cosP; // vertical clearance in plan
-  const cU = clearance;        // horizontal clearance
-  const gV = gap * cosP;
+  const pH = panelH * cosP;  // panel height (along slope) → plan
+  const cV = clearance;      // clearance setback (plan)
+  const cU = clearance;
+  const gV = gap * cosP;     // inter-row gap (along slope) → plan
 
   // Inset polygon for clearance check
   const insetPoly = offsetPolygon(pts, -clearance);
@@ -158,24 +160,43 @@ function computePanelLayout(pts, edgeIdx, edgeTypes, pitch, config) {
     return best === edgeIdx;
   };
 
-  // Fit panels
-  const panels = [];
-  for (let u = uMin + cU; u + panelW <= uMax - cU + 1e-9; u += panelW + gap) {
-    for (let v = vMin + cV; v + pH <= vMax - cV + 1e-9; v += pH + gV) {
-      const corners = [
-        toWorld(u, v), toWorld(u + panelW, v),
-        toWorld(u + panelW, v + pH), toWorld(u, v + pH),
-      ];
-      if (corners.every(c => inVoronoi(c.x, c.y) && inInset(c.x, c.y)))
-        panels.push({ u, v, w: panelW, h: pH });
+  // Sample this plane's Voronoi region for a tight bounding box (local + world)
+  let ruMin = Infinity, ruMax = -Infinity, rvMin = Infinity, rvMax = -Infinity;
+  let wxMin = Infinity, wxMax = -Infinity, wyMin = Infinity, wyMax = -Infinity;
+  const SS = 0.08; // sample step (m)
+  for (let u = uMin; u <= uMax; u += SS) {
+    for (let v = vMin; v <= vMax; v += SS) {
+      const w = toWorld(u, v);
+      if (!inVoronoi(w.x, w.y)) continue;
+      if (u < ruMin) ruMin = u; if (u > ruMax) ruMax = u;
+      if (v < rvMin) rvMin = v; if (v > rvMax) rvMax = v;
+      if (w.x < wxMin) wxMin = w.x; if (w.x > wxMax) wxMax = w.x;
+      if (w.y < wyMin) wyMin = w.y; if (w.y > wyMax) wyMax = w.y;
     }
   }
+  if (!isFinite(ruMin)) return null; // empty region
 
-  // World bounding box of the polygon (for canvas orientation matching roof planes view)
-  const wxMin = Math.min(...pts.map(p => p.x));
-  const wxMax = Math.max(...pts.map(p => p.x));
-  const wyMin = Math.min(...pts.map(p => p.y));
-  const wyMax = Math.max(...pts.map(p => p.y));
+  // Fit panels: rows packed from the eave (rvMin) upward; columns centred
+  // across the region width so the grid is symmetric on the plane.
+  const panels = [];
+  const colPitch = panelW + gap;
+  const usableU = (ruMax - cU) - (ruMin + cU);
+  const nCols = Math.floor((usableU + gap) / colPitch + 1e-9);
+  if (nCols > 0) {
+    const gridW = nCols * panelW + (nCols - 1) * gap;
+    const u0 = (ruMin + cU) + (usableU - gridW) / 2;
+    for (let c = 0; c < nCols; c++) {
+      const u = u0 + c * colPitch;
+      for (let v = rvMin + cV; v + pH <= rvMax - cV + 1e-9; v += pH + gV) {
+        const corners = [
+          toWorld(u, v), toWorld(u + panelW, v),
+          toWorld(u + panelW, v + pH), toWorld(u, v + pH),
+        ];
+        if (corners.every(cc => inVoronoi(cc.x, cc.y) && inInset(cc.x, cc.y)))
+          panels.push({ u, v, w: panelW, h: pH });
+      }
+    }
+  }
 
   // Eave endpoints in world coords (for SVG overlay)
   const eaveAWorld = { x: a.x, y: a.y };
