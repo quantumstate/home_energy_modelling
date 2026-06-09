@@ -259,6 +259,24 @@ function PanelLayoutView({ layout, plane, panelConfig, efficiency, perfRatio }) 
       }
     }
     ctx.putImageData(imgData, 0, 0);
+
+    // Draw eave line directly on canvas (pixel-perfect, no SVG overlay offset)
+    const scx = (wx) => (wx - wxMin + PAD) * scale;
+    const scy = (wy) => (wy - wyMin + PAD) * scale;
+    const { eaveAWorld, eaveBWorld } = layout;
+    ctx.beginPath();
+    ctx.moveTo(scx(eaveAWorld.x), scy(eaveAWorld.y));
+    ctx.lineTo(scx(eaveBWorld.x), scy(eaveBWorld.y));
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    // Eave label
+    const midX = scx((eaveAWorld.x + eaveBWorld.x) / 2);
+    const midY = scy((eaveAWorld.y + eaveBWorld.y) / 2);
+    ctx.fillStyle = 'rgba(245,158,11,0.6)';
+    ctx.font = '9px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('EAVE', midX, midY + 12);
   }, [layout]);
 
   if (!layout) return (
@@ -267,7 +285,7 @@ function PanelLayoutView({ layout, plane, panelConfig, efficiency, perfRatio }) 
     </div>
   );
 
-  const { panelsWorld, wxMin, wxMax, wyMin, wyMax, eaveAWorld, eaveBWorld } = layout;
+  const { panelsWorld, wxMin, wxMax, wyMin, wyMax } = layout;
   const { w: panelW_cfg, h: panelH_cfg } = panelConfig;
 
   const SVG_W = 400;
@@ -277,7 +295,7 @@ function PanelLayoutView({ layout, plane, panelConfig, efficiency, perfRatio }) 
   const scale = SVG_W / (spanX + 2 * PAD);
   const svgH  = Math.max(60, Math.round((spanY + 2 * PAD) * scale));
 
-  // World coord → canvas pixel (matches world→canvas in RoofPlanesCanvas)
+  // World coord → canvas pixel
   const scx = (wx) => (wx - wxMin + PAD) * scale;
   const scy = (wy) => (wy - wyMin + PAD) * scale;
 
@@ -288,33 +306,22 @@ function PanelLayoutView({ layout, plane, panelConfig, efficiency, perfRatio }) 
   const annualOutput   = installedKwp * plane.annualIrradiation * (perfRatio / 100);
   const coverage       = plane.slopeArea > 0 ? (totalSlopeArea / plane.slopeArea * 100) : 0;
 
-  const eaveMidX = (eaveAWorld.x + eaveBWorld.x) / 2;
-  const eaveMidY = (eaveAWorld.y + eaveBWorld.y) / 2;
-
   return (
     <div>
       <div style={{ position: 'relative', marginBottom: 10, borderRadius: 4, border: '1px solid #1e3a6b', overflow: 'hidden' }}>
-        {/* Raster background: exact plane shape in world orientation */}
+        {/* Canvas: raster plane shape + eave line drawn directly */}
         <canvas ref={canvasRef} width={SVG_W} height={svgH}
           style={{ display: 'block', width: '100%' }} />
-        {/* SVG overlay: panels + eave (world coords mapped to canvas pixels) */}
+        {/* SVG overlay: panels only */}
         <svg width={SVG_W} height={svgH}
           style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}>
-          {/* Eave edge */}
-          <line x1={scx(eaveAWorld.x)} y1={scy(eaveAWorld.y)}
-                x2={scx(eaveBWorld.x)} y2={scy(eaveBWorld.y)}
-            stroke="#f59e0b" strokeWidth={2.5} />
-          {/* Panels — render as polygons using world corner positions */}
           {panelsWorld.map((p, i) => {
-            const d = p.corners.map((c, j) =>
+            const pd = p.corners.map((c, j) =>
               `${j ? 'L' : 'M'}${scx(c.x).toFixed(1)},${scy(c.y).toFixed(1)}`
             ).join(' ') + 'Z';
-            return <path key={i} d={d}
+            return <path key={i} d={pd}
               fill="rgba(59,130,246,0.5)" stroke="#60a5fa" strokeWidth={0.75} />;
           })}
-          {/* Eave label */}
-          <text x={scx(eaveMidX)} y={scy(eaveMidY) + 10}
-            fill="#f59e0b99" fontSize={8} textAnchor="middle" fontFamily="monospace">EAVE</text>
         </svg>
       </div>
       <MetricRow label="Panels"             value={count} />
