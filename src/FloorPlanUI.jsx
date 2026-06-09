@@ -3,6 +3,7 @@ import { buildingModelFromState } from "./geometryProcessor.js";
 import { STOREY_LABELS as STOREY_LABELS_CONST, DEFAULT_U_VALUES } from "./constants.js";
 import { recorder } from "./sessionRecorder.js";
 import ReplayPanel from "./ReplayPanel.jsx";
+import { offsetPolygon, computeRoofLines } from "./roofGeometry.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PPM  = 60;
@@ -60,134 +61,8 @@ const projectOntoWall = (pt, a, b) => {
 let _uid = 0;
 const uid = () => `id${++_uid}`;
 
-// Expand (or contract) a polygon by moving each vertex along its outward bisector.
-// distance > 0 = outward (overhang), distance < 0 = inward.
-function offsetPolygon(points, distance) {
-  const n = points.length;
-  if (n < 3 || Math.abs(distance) < 1e-10) return points;
-  const cen = { x: points.reduce((s,p)=>s+p.x,0)/n, y: points.reduce((s,p)=>s+p.y,0)/n };
-  const outNorm = (a, b) => {
-    const dx = b.x-a.x, dy = b.y-a.y, len = Math.sqrt(dx*dx+dy*dy);
-    if (len < 1e-10) return {x:0,y:0};
-    let nx = dy/len, ny = -dx/len;
-    const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
-    if ((cen.x-mx)*nx+(cen.y-my)*ny > 0) { nx=-nx; ny=-ny; }
-    return {x:nx, y:ny};
-  };
-  const norms = points.map((p,i) => outNorm(p, points[(i+1)%n]));
-  return points.map((p, i) => {
-    const n1 = norms[(i-1+n)%n], n2 = norms[i];
-    const denom = 1 + n1.x*n2.x + n1.y*n2.y;
-    if (Math.abs(denom) < 1e-10) return { x: p.x+n2.x*distance, y: p.y+n2.y*distance };
-    return { x: p.x+(n1.x+n2.x)/denom*distance, y: p.y+(n1.y+n2.y)/denom*distance };
-  });
-}
-
 // ─── Roof geometry ────────────────────────────────────────────────────────────
-// Straight-skeleton algorithm for ridge/hip line computation.
-// Only vertices where BOTH flanking edges are "bottom" (active) trace ridge paths.
-function computeRoofLines(points, edgeTypes) {
-  const n = points.length;
-  if (n < 3) return [];
-
-  const inwardNormal = (a, b, cen) => {
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 1e-10) return { x: 0, y: 0 };
-    let nx = -dy / len, ny = dx / len;
-    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    if ((cen.x - mx) * nx + (cen.y - my) * ny < 0) { nx = -nx; ny = -ny; }
-    return { x: nx, y: ny };
-  };
-
-  let verts = points.map(p => ({ ...p }));
-  let active = edgeTypes.map(e => e === 'bottom');
-  const segments = [];
-
-  for (let iter = 0; iter < 200; iter++) {
-    const m = verts.length;
-    if (m < 3) {
-      if (m === 2 && active.some(a => a)) {
-        const dx = verts[1].x - verts[0].x, dy = verts[1].y - verts[0].y;
-        if (dx * dx + dy * dy > 1e-6)
-          segments.push({ x1: verts[0].x, y1: verts[0].y, x2: verts[1].x, y2: verts[1].y });
-      }
-      break;
-    }
-    if (!active.some(a => a)) break;
-
-    const cen = { x: verts.reduce((s, v) => s + v.x, 0) / m, y: verts.reduce((s, v) => s + v.y, 0) / m };
-    const norms = verts.map((v, i) => inwardNormal(v, verts[(i + 1) % m], cen));
-
-    const bisect = (i) => {
-      const pe = (i - 1 + m) % m, ce = i;
-      const pa = active[pe], ca = active[ce];
-      if (!pa && !ca) return { x: 0, y: 0 };
-      const np = norms[pe], nc = norms[ce];
-      if (pa && ca) {
-        const d = 1 + np.x * nc.x + np.y * nc.y;
-        return Math.abs(d) < 1e-10 ? { x: 0, y: 0 } : { x: (np.x + nc.x) / d, y: (np.y + nc.y) / d };
-      }
-      const an = pa ? np : nc, ie = pa ? ce : pe;
-      const a = verts[ie], b = verts[(ie + 1) % m];
-      const edx = b.x - a.x, edy = b.y - a.y, el = Math.sqrt(edx * edx + edy * edy);
-      if (el < 1e-10) return { x: 0, y: 0 };
-      let ex = edx / el, ey = edy / el;
-      let dot = an.x * ex + an.y * ey;
-      if (dot < 0) { ex = -ex; ey = -ey; dot = -dot; }
-      if (dot < 1e-6) return { x: 0, y: 0 };
-      return { x: ex / dot, y: ey / dot };
-    };
-
-    const bs = verts.map((_, i) => bisect(i));
-
-    let minT = Infinity;
-    const coll = [];
-    for (let i = 0; i < m; i++) {
-      const j = (i + 1) % m;
-      const bi = bs[i], bj = bs[j];
-      const rx = verts[i].x - verts[j].x, ry = verts[i].y - verts[j].y;
-      const dvx = bi.x - bj.x, dvy = bi.y - bj.y;
-      const dv2 = dvx * dvx + dvy * dvy;
-      if (dv2 < 1e-12) continue;
-      const tc = -(rx * dvx + ry * dvy) / dv2;
-      if (tc < 1e-9) continue;
-      const fx = rx + tc * dvx, fy = ry + tc * dvy;
-      if (fx * fx + fy * fy < 1e-3) {
-        if (tc < minT - 1e-9) { minT = tc; coll.length = 0; coll.push(i); }
-        else if (tc < minT + 1e-9) coll.push(i);
-      }
-    }
-    if (!coll.length || minT > 1e6) break;
-
-    const nv = verts.map((v, i) => ({ x: v.x + bs[i].x * minT, y: v.y + bs[i].y * minT }));
-
-    // Only bottom-bottom vertex paths are real ridge/hip lines
-    for (let i = 0; i < m; i++) {
-      const pe = (i - 1 + m) % m;
-      if (!active[pe] || !active[i]) continue;
-      const dx = nv[i].x - verts[i].x, dy = nv[i].y - verts[i].y;
-      if (dx * dx + dy * dy > 1e-8)
-        segments.push({ x1: verts[i].x, y1: verts[i].y, x2: nv[i].x, y2: nv[i].y });
-    }
-
-    const rem = new Set();
-    for (const i of coll) {
-      const j = (i + 1) % m;
-      const mp = { x: (nv[i].x + nv[j].x) / 2, y: (nv[i].y + nv[j].y) / 2 };
-      nv[i] = mp; rem.add(j);
-    }
-
-    const nVerts = [], nActive = [];
-    for (let i = 0; i < m; i++) {
-      if (rem.has(i)) continue;
-      nVerts.push({ ...nv[i] });
-      nActive.push(coll.includes(i) ? active[(i + 1) % m] : active[i]);
-    }
-    verts = nVerts; active = nActive;
-  }
-  return segments;
-}
+// offsetPolygon and computeRoofLines are imported from roofGeometry.js above.
 
 const ROOF_COLOR  = { fill: "#f59e0b", line: "#f59e0b", label: "#fde68a" };
 const ROOF_DEFAULT_PITCH = 35;

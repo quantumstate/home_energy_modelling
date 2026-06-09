@@ -2,173 +2,17 @@ import { useState, useMemo, useRef, useEffect } from "react";
 import { parseEPW } from "./epwParser.js";
 import { solarPosition } from "./solarGain.js";
 import kewEPWRaw from "./assets/GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw?raw";
+import {
+  offsetPolygon,
+  isInsidePoly,
+  distSqToSeg,
+  computeRoofLines,
+  computeRoofPlanePolygon,
+  computeRoofPlaneAreas,
+} from "./roofGeometry.js";
 
 const VIEW_PAD = 0.4; // padding in metres around roofs in canvas view
 const PLANE_PALETTE = ['#f59e0b', '#3b82f6', '#10b981', '#f43f5e', '#8b5cf6', '#06b6d4', '#f97316', '#a855f7'];
-
-// ─── Geometry helpers ─────────────────────────────────────────────────────────
-
-function offsetPolygon(points, distance) {
-  const n = points.length;
-  if (n < 3 || Math.abs(distance) < 1e-10) return points;
-  const cen = { x: points.reduce((s, p) => s + p.x, 0) / n, y: points.reduce((s, p) => s + p.y, 0) / n };
-  const outNorm = (a, b) => {
-    const dx = b.x - a.x, dy = b.y - a.y, len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 1e-10) return { x: 0, y: 0 };
-    let nx = dy / len, ny = -dx / len;
-    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    if ((cen.x - mx) * nx + (cen.y - my) * ny > 0) { nx = -nx; ny = -ny; }
-    return { x: nx, y: ny };
-  };
-  const norms = points.map((p, i) => outNorm(p, points[(i + 1) % n]));
-  return points.map((p, i) => {
-    const n1 = norms[(i - 1 + n) % n], n2 = norms[i];
-    const denom = 1 + n1.x * n2.x + n1.y * n2.y;
-    if (Math.abs(denom) < 1e-10) return { x: p.x + n2.x * distance, y: p.y + n2.y * distance };
-    return { x: p.x + (n1.x + n2.x) / denom * distance, y: p.y + (n1.y + n2.y) / denom * distance };
-  });
-}
-
-function isInsidePoly(px, py, pts) {
-  let inside = false;
-  const n = pts.length;
-  for (let i = 0, j = n - 1; i < n; j = i++) {
-    const xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y;
-    if (((yi > py) !== (yj > py)) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
-
-function distSqToSeg(px, py, ax, ay, bx, by) {
-  const dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-  if (len2 < 1e-10) return (px - ax) ** 2 + (py - ay) ** 2;
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
-  return (px - ax - t * dx) ** 2 + (py - ay - t * dy) ** 2;
-}
-
-// Straight skeleton – returns [{x1,y1,x2,y2}] ridge/hip segments.
-function computeRoofLines(points, edgeTypes) {
-  const n = points.length;
-  if (n < 3) return [];
-  const inwardNormal = (a, b, cen) => {
-    const dx = b.x - a.x, dy = b.y - a.y, len = Math.sqrt(dx * dx + dy * dy);
-    if (len < 1e-10) return { x: 0, y: 0 };
-    let nx = -dy / len, ny = dx / len;
-    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    if ((cen.x - mx) * nx + (cen.y - my) * ny < 0) { nx = -nx; ny = -ny; }
-    return { x: nx, y: ny };
-  };
-  let verts = points.map(p => ({ ...p }));
-  let active = edgeTypes.map(e => e === 'bottom');
-  const segments = [];
-  for (let iter = 0; iter < 200; iter++) {
-    const m = verts.length;
-    if (m < 3) {
-      if (m === 2 && active.some(a => a)) {
-        const dx = verts[1].x - verts[0].x, dy = verts[1].y - verts[0].y;
-        if (dx * dx + dy * dy > 1e-6)
-          segments.push({ x1: verts[0].x, y1: verts[0].y, x2: verts[1].x, y2: verts[1].y });
-      }
-      break;
-    }
-    if (!active.some(a => a)) break;
-    const cen = { x: verts.reduce((s, v) => s + v.x, 0) / m, y: verts.reduce((s, v) => s + v.y, 0) / m };
-    const norms = verts.map((v, i) => inwardNormal(v, verts[(i + 1) % m], cen));
-    const bisect = (i) => {
-      const pe = (i - 1 + m) % m;
-      const pa = active[pe], ca = active[i];
-      if (!pa && !ca) return { x: 0, y: 0 };
-      const np = norms[pe], nc = norms[i];
-      if (pa && ca) {
-        const d = 1 + np.x * nc.x + np.y * nc.y;
-        return Math.abs(d) < 1e-10 ? { x: 0, y: 0 } : { x: (np.x + nc.x) / d, y: (np.y + nc.y) / d };
-      }
-      const ie = pa ? i : pe;
-      const a = verts[ie], b = verts[(ie + 1) % m];
-      const edx = b.x - a.x, edy = b.y - a.y, el = Math.sqrt(edx * edx + edy * edy);
-      if (el < 1e-10) return { x: 0, y: 0 };
-      let ex = edx / el, ey = edy / el;
-      let dot = (pa ? np : nc).x * ex + (pa ? np : nc).y * ey;
-      if (dot < 0) { ex = -ex; ey = -ey; dot = -dot; }
-      if (dot < 1e-6) return { x: 0, y: 0 };
-      return { x: ex / dot, y: ey / dot };
-    };
-    const bs = verts.map((_, i) => bisect(i));
-    let minT = Infinity;
-    const coll = [];
-    for (let i = 0; i < m; i++) {
-      const j = (i + 1) % m;
-      const bi = bs[i], bj = bs[j];
-      const rx = verts[i].x - verts[j].x, ry = verts[i].y - verts[j].y;
-      const dvx = bi.x - bj.x, dvy = bi.y - bj.y;
-      const dv2 = dvx * dvx + dvy * dvy;
-      if (dv2 < 1e-12) continue;
-      const tc = -(rx * dvx + ry * dvy) / dv2;
-      if (tc < 1e-9) continue;
-      const fx = rx + tc * dvx, fy = ry + tc * dvy;
-      if (fx * fx + fy * fy < 1e-3) {
-        if (tc < minT - 1e-9) { minT = tc; coll.length = 0; coll.push(i); }
-        else if (tc < minT + 1e-9) coll.push(i);
-      }
-    }
-    if (!coll.length || minT > 1e6) break;
-    const nv = verts.map((v, i) => ({ x: v.x + bs[i].x * minT, y: v.y + bs[i].y * minT }));
-    for (let i = 0; i < m; i++) {
-      const pe = (i - 1 + m) % m;
-      if (!active[pe] || !active[i]) continue;
-      const dx = nv[i].x - verts[i].x, dy = nv[i].y - verts[i].y;
-      if (dx * dx + dy * dy > 1e-8)
-        segments.push({ x1: verts[i].x, y1: verts[i].y, x2: nv[i].x, y2: nv[i].y });
-    }
-    const rem = new Set();
-    for (const i of coll) { const j = (i + 1) % m; nv[i] = { x: (nv[i].x + nv[j].x) / 2, y: (nv[i].y + nv[j].y) / 2 }; rem.add(j); }
-    const nVerts = [], nActive = [];
-    for (let i = 0; i < m; i++) {
-      if (rem.has(i)) continue;
-      nVerts.push({ ...nv[i] });
-      nActive.push(coll.includes(i) ? active[(i + 1) % m] : active[i]);
-    }
-    verts = nVerts; active = nActive;
-  }
-  return segments;
-}
-
-// Returns { [edgeIdx]: { projected, slope } } for each bottom edge.
-function computeRoofPlaneAreas(points, edgeTypes, overhang, pitch) {
-  const pts = offsetPolygon(points, overhang);
-  const n = pts.length;
-  if (n < 3) return {};
-  const bottomEdges = [];
-  for (let i = 0; i < n; i++) {
-    if ((edgeTypes[i] ?? 'bottom') === 'bottom')
-      bottomEdges.push({ i, a: pts[i], b: pts[(i + 1) % n] });
-  }
-  if (bottomEdges.length === 0) return {};
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
-  const step = 0.05; // metres
-  const cellAreaM2 = step * step;
-  const counts = {};
-  bottomEdges.forEach(e => { counts[e.i] = 0; });
-  for (let x = minX + step / 2; x <= maxX; x += step) {
-    for (let y = minY + step / 2; y <= maxY; y += step) {
-      if (!isInsidePoly(x, y, pts)) continue;
-      let minD2 = Infinity, closest = bottomEdges[0].i;
-      for (const e of bottomEdges) {
-        const d2 = distSqToSeg(x, y, e.a.x, e.a.y, e.b.x, e.b.y);
-        if (d2 < minD2) { minD2 = d2; closest = e.i; }
-      }
-      counts[closest]++;
-    }
-  }
-  const cosP = Math.cos(pitch * Math.PI / 180);
-  const result = {};
-  for (const e of bottomEdges) {
-    const projected = counts[e.i] * cellAreaM2;
-    result[e.i] = { projected, slope: projected / cosP };
-  }
-  return result;
-}
 
 // ─── Solar calculations ───────────────────────────────────────────────────────
 
@@ -237,6 +81,249 @@ function computeAnnualIrradiation(bearing, tiltDeg, hourly, location) {
 function bearingToLabel(deg) {
   const dirs = ["N","NE","E","SE","S","SW","W","NW"];
   return dirs[Math.round(((deg % 360) + 360) % 360 / 45) % 8];
+}
+
+// ─── Panel layout ─────────────────────────────────────────────────────────────
+
+/**
+ * Fit rectangular panels onto a single roof plane (the Voronoi region of one
+ * bottom edge). Works in a local 2D coordinate system: eu along eave, ev into slope.
+ *
+ * Returns null if the edge is degenerate, otherwise an object with:
+ *   panels       – [{u,v,w,h}] panel rectangles in local plan coords
+ *   uMin/uMax/vMin/vMax – full-polygon bounding box in local coords
+ *   origin, eu, ev    – local frame origin and axes (for canvas pixel → world)
+ *   pH, panelW        – panel dims in plan coords
+ *   eaveU0, eaveU1    – eave u-extents (always v=0)
+ *   pts, bottomEdges, edgeIdx – passed through for canvas rendering
+ *   insetPoly         – cleared polygon (for canvas rendering)
+ */
+function computePanelLayout(pts, edgeIdx, edgeTypes, pitch, config) {
+  const { w: panelW, h: panelH, clearance, gap } = config;
+  const n = pts.length;
+  const a = pts[edgeIdx], b = pts[(edgeIdx + 1) % n];
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 1e-10) return null;
+
+  // Local frame: eu along eave, ev perpendicular into polygon
+  const eu = { x: dx / len, y: dy / len };
+  const cen = { x: pts.reduce((s, p) => s + p.x, 0) / n, y: pts.reduce((s, p) => s + p.y, 0) / n };
+  const n1 = { x: -eu.y, y: eu.x };
+  const ev = (n1.x * (cen.x - a.x) + n1.y * (cen.y - a.y)) > 0 ? n1 : { x: eu.y, y: -eu.x };
+
+  const toLocal = (px, py) => ({
+    u: (px - a.x) * eu.x + (py - a.y) * eu.y,
+    v: (px - a.x) * ev.x + (py - a.y) * ev.y,
+  });
+  const toWorld = (u, v) => ({
+    x: a.x + u * eu.x + v * ev.x,
+    y: a.y + u * eu.y + v * ev.y,
+  });
+
+  // Bounding box of the full polygon in local coords
+  const localPts = pts.map(p => toLocal(p.x, p.y));
+  const uMin = Math.min(...localPts.map(p => p.u));
+  const uMax = Math.max(...localPts.map(p => p.u));
+  const vMin = Math.min(...localPts.map(p => p.v));
+  const vMax = Math.max(...localPts.map(p => p.v));
+
+  // Project slope measurements to plan
+  const cosP = Math.cos(pitch * Math.PI / 180);
+  const pH = panelH * cosP;    // panel height in plan
+  const cV = clearance * cosP; // vertical clearance in plan
+  const cU = clearance;        // horizontal clearance
+  const gV = gap * cosP;
+
+  // Inset polygon for clearance check
+  const insetPoly = offsetPolygon(pts, -clearance);
+  const inInset = insetPoly.length >= 3
+    ? (px, py) => isInsidePoly(px, py, insetPoly)
+    : () => false;
+
+  // Bottom edges for Voronoi membership
+  const bottomEdges = [];
+  for (let i = 0; i < n; i++) {
+    if ((edgeTypes[i] ?? 'bottom') === 'bottom')
+      bottomEdges.push({ i, a: pts[i], b: pts[(i + 1) % n] });
+  }
+  const inVoronoi = (px, py) => {
+    if (!isInsidePoly(px, py, pts)) return false;
+    if (bottomEdges.length <= 1) return true;
+    let minD2 = Infinity, best = edgeIdx;
+    for (const e of bottomEdges) {
+      const d2 = distSqToSeg(px, py, e.a.x, e.a.y, e.b.x, e.b.y);
+      if (d2 < minD2) { minD2 = d2; best = e.i; }
+    }
+    return best === edgeIdx;
+  };
+
+  // Fit panels
+  const panels = [];
+  for (let u = uMin + cU; u + panelW <= uMax - cU + 1e-9; u += panelW + gap) {
+    for (let v = vMin + cV; v + pH <= vMax - cV + 1e-9; v += pH + gV) {
+      const corners = [
+        toWorld(u, v), toWorld(u + panelW, v),
+        toWorld(u + panelW, v + pH), toWorld(u, v + pH),
+      ];
+      if (corners.every(c => inVoronoi(c.x, c.y) && inInset(c.x, c.y)))
+        panels.push({ u, v, w: panelW, h: pH });
+    }
+  }
+
+  // World bounding box of the polygon (for canvas orientation matching roof planes view)
+  const wxMin = Math.min(...pts.map(p => p.x));
+  const wxMax = Math.max(...pts.map(p => p.x));
+  const wyMin = Math.min(...pts.map(p => p.y));
+  const wyMax = Math.max(...pts.map(p => p.y));
+
+  // Eave endpoints in world coords (for SVG overlay)
+  const eaveAWorld = { x: a.x, y: a.y };
+  const eaveBWorld = { x: b.x, y: b.y };
+
+  // Panels stored as world-coord corner lists for easy SVG rendering
+  const panelsWorld = panels.map(p => ({
+    corners: [
+      toWorld(p.u, p.v), toWorld(p.u + p.w, p.v),
+      toWorld(p.u + p.w, p.v + p.h), toWorld(p.u, p.v + p.h),
+    ],
+  }));
+
+  return {
+    panels, panelsWorld, uMin, uMax, vMin, vMax, pH, panelW,
+    origin: a, eu, ev,
+    wxMin, wxMax, wyMin, wyMax,
+    eaveAWorld, eaveBWorld,
+    // Pass through for canvas rendering
+    pts, bottomEdges, edgeIdx, insetPoly,
+  };
+}
+
+/**
+ * Panel layout view: raster canvas for the exact roof plane shape rendered
+ * in world coordinates (same orientation as the roof planes canvas on the left),
+ * with an SVG overlay for panels and the eave highlight.
+ */
+function PanelLayoutView({ layout, plane, panelConfig, efficiency, perfRatio }) {
+  const canvasRef = useRef(null);
+
+  // Rasterise the roof plane shape into the canvas using world coordinates
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !layout) return;
+    const { wxMin, wxMax, wyMin, wyMax, pts, bottomEdges, edgeIdx, insetPoly } = layout;
+
+    const SVG_W = canvas.width;
+    const PAD   = 0.3;
+    const spanX = wxMax - wxMin;
+    const spanY = wyMax - wyMin;
+    const scale = SVG_W / (spanX + 2 * PAD);
+    const H     = Math.max(60, Math.round((spanY + 2 * PAD) * scale));
+    canvas.height = H;
+
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(SVG_W, H);
+    const d = imgData.data;
+
+    const inVoronoi = (wx, wy) => {
+      if (!isInsidePoly(wx, wy, pts)) return false;
+      if (bottomEdges.length <= 1) return true;
+      let minD2 = Infinity, best = edgeIdx;
+      for (const e of bottomEdges) {
+        const d2 = distSqToSeg(wx, wy, e.a.x, e.a.y, e.b.x, e.b.y);
+        if (d2 < minD2) { minD2 = d2; best = e.i; }
+      }
+      return best === edgeIdx;
+    };
+
+    const inInset = insetPoly.length >= 3
+      ? (wx, wy) => isInsidePoly(wx, wy, insetPoly)
+      : () => false;
+
+    for (let cy = 0; cy < H; cy++) {
+      for (let cx = 0; cx < SVG_W; cx++) {
+        // Canvas pixel → world coords (same mapping as RoofPlanesCanvas)
+        const wx = wxMin - PAD + cx / scale;
+        const wy = wyMin - PAD + cy / scale;
+        const i4 = (cy * SVG_W + cx) * 4;
+
+        if (inVoronoi(wx, wy)) {
+          if (inInset(wx, wy)) {
+            d[i4]=25; d[i4+1]=55; d[i4+2]=110; d[i4+3]=230;
+          } else {
+            d[i4]=15; d[i4+1]=35; d[i4+2]=75; d[i4+3]=180;
+          }
+        } else if (isInsidePoly(wx, wy, pts)) {
+          d[i4]=12; d[i4+1]=20; d[i4+2]=35; d[i4+3]=140;
+        }
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }, [layout]);
+
+  if (!layout) return (
+    <div style={{ color: "#1a3050", fontSize: 10, textAlign: "center", padding: 20 }}>
+      No layout computed.
+    </div>
+  );
+
+  const { panelsWorld, wxMin, wxMax, wyMin, wyMax, eaveAWorld, eaveBWorld } = layout;
+  const { w: panelW_cfg, h: panelH_cfg } = panelConfig;
+
+  const SVG_W = 400;
+  const PAD   = 0.3;
+  const spanX = wxMax - wxMin;
+  const spanY = wyMax - wyMin;
+  const scale = SVG_W / (spanX + 2 * PAD);
+  const svgH  = Math.max(60, Math.round((spanY + 2 * PAD) * scale));
+
+  // World coord → canvas pixel (matches world→canvas in RoofPlanesCanvas)
+  const scx = (wx) => (wx - wxMin + PAD) * scale;
+  const scy = (wy) => (wy - wyMin + PAD) * scale;
+
+  const panelSlopeArea = panelW_cfg * panelH_cfg;
+  const count          = panelsWorld.length;
+  const totalSlopeArea = count * panelSlopeArea;
+  const installedKwp   = totalSlopeArea * (efficiency / 100);
+  const annualOutput   = installedKwp * plane.annualIrradiation * (perfRatio / 100);
+  const coverage       = plane.slopeArea > 0 ? (totalSlopeArea / plane.slopeArea * 100) : 0;
+
+  const eaveMidX = (eaveAWorld.x + eaveBWorld.x) / 2;
+  const eaveMidY = (eaveAWorld.y + eaveBWorld.y) / 2;
+
+  return (
+    <div>
+      <div style={{ position: 'relative', marginBottom: 10, borderRadius: 4, border: '1px solid #1e3a6b', overflow: 'hidden' }}>
+        {/* Raster background: exact plane shape in world orientation */}
+        <canvas ref={canvasRef} width={SVG_W} height={svgH}
+          style={{ display: 'block', width: '100%' }} />
+        {/* SVG overlay: panels + eave (world coords mapped to canvas pixels) */}
+        <svg width={SVG_W} height={svgH}
+          style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}>
+          {/* Eave edge */}
+          <line x1={scx(eaveAWorld.x)} y1={scy(eaveAWorld.y)}
+                x2={scx(eaveBWorld.x)} y2={scy(eaveBWorld.y)}
+            stroke="#f59e0b" strokeWidth={2.5} />
+          {/* Panels — render as polygons using world corner positions */}
+          {panelsWorld.map((p, i) => {
+            const d = p.corners.map((c, j) =>
+              `${j ? 'L' : 'M'}${scx(c.x).toFixed(1)},${scy(c.y).toFixed(1)}`
+            ).join(' ') + 'Z';
+            return <path key={i} d={d}
+              fill="rgba(59,130,246,0.5)" stroke="#60a5fa" strokeWidth={0.75} />;
+          })}
+          {/* Eave label */}
+          <text x={scx(eaveMidX)} y={scy(eaveMidY) + 10}
+            fill="#f59e0b99" fontSize={8} textAnchor="middle" fontFamily="monospace">EAVE</text>
+        </svg>
+      </div>
+      <MetricRow label="Panels"             value={count} />
+      <MetricRow label="Panel area"         value={totalSlopeArea.toFixed(1)} unit="m²" />
+      <MetricRow label="Coverage"           value={coverage.toFixed(0)} unit="%" />
+      <MetricRow label="Installed"          value={installedKwp.toFixed(2)} unit="kWp" />
+      <MetricRow label="Est. annual output" value={annualOutput.toFixed(0)} unit="kWh/yr" />
+    </div>
+  );
 }
 
 // ─── Data loading ─────────────────────────────────────────────────────────────
@@ -478,6 +565,7 @@ export default function SolarTab({ projectId }) {
   const [selectedKey, setSelectedKey] = useState(null);
   const [efficiency, setEfficiency] = useState(20); // percent
   const [perfRatio, setPerfRatio] = useState(80); // percent
+  const [panelConfig, setPanelConfig] = useState({ w: 1.722, h: 1.134, clearance: 0.3, gap: 0.02 });
 
   const roofsByStorey = useMemo(() => loadRoofsByStorey(projectId), [projectId]);
 
@@ -531,6 +619,18 @@ export default function SolarTab({ projectId }) {
   }, [planes]);
 
   const selectedPlane = planes.find(p => p.key === selectedKey) ?? null;
+
+  const panelLayout = useMemo(() => {
+    if (!selectedPlane) return null;
+    const [si, roofId, edgeIdxStr] = selectedPlane.key.split(':');
+    const roofs = roofsByStorey[parseInt(si)] || [];
+    const roof = roofs.find(r => r.id === roofId);
+    if (!roof?.points?.length) return null;
+    const edgeIdx = parseInt(edgeIdxStr);
+    const pts = offsetPolygon(roof.points, roof.overhang ?? 0);
+    const edgeTypes = roof.edgeTypes || pts.map(() => 'bottom');
+    return computePanelLayout(pts, edgeIdx, edgeTypes, roof.pitch ?? 35, panelConfig);
+  }, [selectedPlane, roofsByStorey, panelConfig]);
 
   if (planes.length === 0) {
     return (
@@ -637,6 +737,36 @@ export default function SolarTab({ projectId }) {
                 <SectionHeader label="AREA" />
                 <MetricRow label="Slope area" value={selectedPlane.slopeArea.toFixed(2)} unit="m²" />
                 <MetricRow label="Projected (plan) area" value={selectedPlane.projectedArea.toFixed(2)} unit="m²" />
+              </div>
+
+              <div style={{ background: "#070d1a", border: "1px solid #1e4a1e", borderRadius: 6, padding: "14px 16px", marginBottom: 14 }}>
+                <SectionHeader label="PANEL LAYOUT" />
+                {/* Config row */}
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "8px 16px", marginBottom: 12 }}>
+                  {[
+                    { label: "Width", key: "w", unit: "m", min: 0.5, max: 3, step: 0.001 },
+                    { label: "Height", key: "h", unit: "m", min: 0.5, max: 3, step: 0.001 },
+                    { label: "Clearance", key: "clearance", unit: "m", min: 0, max: 1, step: 0.05 },
+                    { label: "Gap", key: "gap", unit: "m", min: 0, max: 0.2, step: 0.005 },
+                  ].map(({ label, key, unit, min, max, step }) => (
+                    <div key={key} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span style={{ color: "#2d5a8a", fontSize: 9, fontFamily: "monospace", letterSpacing: "0.05em" }}>{label}</span>
+                      <input type="number" min={min} max={max} step={step}
+                        value={panelConfig[key]}
+                        onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setPanelConfig(c => ({ ...c, [key]: Math.max(min, Math.min(max, v)) })); }}
+                        style={{ width: 52, background: "#0a1628", border: "1px solid #1e4a1e", borderRadius: 3, color: "#c8d8f0", fontSize: 11, fontFamily: "monospace", padding: "2px 4px", outline: "none" }}
+                      />
+                      <span style={{ color: "#2d5a8a", fontSize: 9, fontFamily: "monospace" }}>{unit}</span>
+                    </div>
+                  ))}
+                </div>
+                <PanelLayoutView
+                  layout={panelLayout}
+                  plane={selectedPlane}
+                  panelConfig={panelConfig}
+                  efficiency={efficiency}
+                  perfRatio={perfRatio}
+                />
               </div>
 
               <div style={{ background: "#070d1a", border: "1px solid #78350f", borderRadius: 6, padding: "14px 16px", marginBottom: 14 }}>
