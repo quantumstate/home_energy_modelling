@@ -9,7 +9,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:wasm": "bash cpp/build.sh",
+    "build:wasm:win": "cpp\\build.bat"
   },
   "dependencies": {
     "react": "^19.2.6",

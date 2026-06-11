@@ -1,0 +1,85 @@
+// Bridge between the "Thermal Bridges" CAD view and the WebAssembly thermal
+// solver built from cpp/thermal_solver.cpp (see cpp/build.sh).
+//
+// The C++ side does not implement the actual heat-conduction solve yet — see
+// cpp/thermal_solver.cpp. This module only wires up geometry conversion and
+// module loading so the UI can call into it once the numerics land.
+
+import { MATERIALS, isEdgeShared, edgeKey, DEFAULT_CONDITION_ID } from "./thermalBridgeGeometry.js";
+
+let modulePromise = null;
+
+// Lazily loads the compiled wasm module. Returns null if it hasn't been
+// built yet (run `npm run build:wasm`).
+function loadModule() {
+  if (!modulePromise) {
+    modulePromise = import("./wasm/thermal_solver.mjs")
+      .then((mod) => mod.default())
+      .catch(() => null);
+  }
+  return modulePromise;
+}
+
+const lambdaForMaterial = (materialId) =>
+  MATERIALS.find((m) => m.id === materialId)?.lambda ?? 0;
+
+// Converts the editor's shapes into the flat Layer list the solver expects.
+function shapesToLayers(shapes) {
+  return shapes.map((s) => ({
+    x: s.x,
+    y: s.y,
+    w: s.w,
+    h: s.h,
+    lambda: lambdaForMaterial(s.materialId),
+  }));
+}
+
+// Converts the editor's per-edge boundary conditions into the flat
+// EdgeCondition list the solver expects, indexed by position in `shapes`.
+// Shared edges between elements are skipped, since they cannot carry a
+// boundary condition.
+function shapesToEdgeConditions(shapes, edgeConditions) {
+  const conditions = [];
+  shapes.forEach((shape, layerIndex) => {
+    for (const side of ["top", "right", "bottom", "left"]) {
+      if (isEdgeShared(shapes, shape.id, side)) continue;
+      const conditionId = edgeConditions[edgeKey(shape.id, side)] || DEFAULT_CONDITION_ID;
+      const temperature = conditionId === "inside" ? 21 : conditionId === "outside" ? -2 : 0;
+      conditions.push({ layerIndex, side, type: conditionId, temperature });
+    }
+  });
+  return conditions;
+}
+
+// Runs the thermal solve for the current cross-section.
+//
+// `shapes` and `edgeConditions` are the same shapes used by the
+// ThermalBridgesTab editor's state.
+//
+// Returns the solver's ThermalResult ({ cols, rows, cellSizeMm, originX,
+// originY, temperatures }), or null if the wasm module hasn't been built.
+export async function runThermalSolve(shapes, edgeConditions, cellSizeMm = 5) {
+  const module = await loadModule();
+  if (!module) return null;
+
+  const layers = new module.LayerVector();
+  for (const layer of shapesToLayers(shapes)) layers.push_back(layer);
+
+  const conditions = new module.EdgeConditionVector();
+  for (const condition of shapesToEdgeConditions(shapes, edgeConditions)) conditions.push_back(condition);
+
+  try {
+    const result = module.solveThermal(layers, conditions, cellSizeMm);
+    return {
+      cols: result.cols,
+      rows: result.rows,
+      cellSizeMm: result.cellSizeMm,
+      originX: result.originX,
+      originY: result.originY,
+      temperatures: result.temperatures.toJs ? result.temperatures.toJs() : Array.from(result.temperatures),
+    };
+  } finally {
+    layers.delete();
+    conditions.delete();
+  }
+}

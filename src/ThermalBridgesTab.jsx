@@ -1,32 +1,17 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { runThermalSolve } from "./thermalSolver.js";
+import {
+  MATERIALS,
+  CONDITIONS,
+  DEFAULT_CONDITION_ID,
+  SIDES,
+  getEdgeSegment,
+  isEdgeShared,
+  edgeKey,
+  distToSegment,
+} from "./thermalBridgeGeometry.js";
 
 const STORAGE_KEY = "thermal_bridges_model";
-
-// ─── Materials ────────────────────────────────────────────────────────────────
-const MATERIALS = [
-  { id: "insulation", name: "Insulation (PIR)", color: "#34d399", lambda: 0.022 },
-  { id: "mineral-wool", name: "Mineral wool", color: "#86efac", lambda: 0.037 },
-  { id: "blockwork", name: "Blockwork", color: "#fbbf24", lambda: 0.51 },
-  { id: "brick", name: "Brick", color: "#f47272", lambda: 0.77 },
-  { id: "concrete", name: "Concrete", color: "#9ca3af", lambda: 1.13 },
-  { id: "timber", name: "Timber", color: "#c08552", lambda: 0.13 },
-  { id: "plasterboard", name: "Plasterboard", color: "#e5e7eb", lambda: 0.25 },
-  { id: "render", name: "Render", color: "#d4d4d8", lambda: 0.7 },
-  { id: "screed", name: "Screed", color: "#a8a29e", lambda: 0.41 },
-  { id: "dpc-cavity", name: "Cavity / DPC", color: "#60a5fa", lambda: 0.025 },
-  { id: "steel", name: "Steel", color: "#7dd3fc", lambda: 50 },
-];
-
-// ─── Boundary conditions ────────────────────────────────────────────────────
-const CONDITIONS = [
-  { id: "inside", name: "Inside", temperature: 21, color: "#f97316" },
-  { id: "outside", name: "Outside", temperature: -2, color: "#38bdf8" },
-  { id: "adiabatic", name: "Adiabatic", temperature: null, color: "#6b7280" },
-];
-const DEFAULT_CONDITION_ID = "adiabatic";
-
-const SIDES = ["top", "right", "bottom", "left"];
-const EDGE_EPS = 0.5; // mm tolerance for detecting shared edges
 
 // ─── Geometry ─────────────────────────────────────────────────────────────────
 const GRID_MM = 50; // base grid spacing in mm
@@ -55,58 +40,6 @@ function normalizeRect(x, y, w, h) {
     w: Math.abs(w),
     h: Math.abs(h),
   };
-}
-
-// Returns the world-space line segment for one side of a shape's rectangle.
-function getEdgeSegment(shape, side) {
-  const { x, y, w, h } = shape;
-  switch (side) {
-    case "top": return { a: { x, y }, b: { x: x + w, y } };
-    case "right": return { a: { x: x + w, y }, b: { x: x + w, y: y + h } };
-    case "bottom": return { a: { x, y: y + h }, b: { x: x + w, y: y + h } };
-    case "left": return { a: { x, y }, b: { x, y: y + h } };
-    default: return null;
-  }
-}
-
-// An edge is "shared" (between two elements) if it is collinear with, and
-// overlaps, an edge of another shape. Shared edges may not have a boundary
-// condition assigned.
-function isEdgeShared(shapes, shapeId, side) {
-  const shape = shapes.find((s) => s.id === shapeId);
-  if (!shape) return false;
-  const seg = getEdgeSegment(shape, side);
-  const horizontal = side === "top" || side === "bottom";
-  for (const other of shapes) {
-    if (other.id === shapeId) continue;
-    for (const oside of SIDES) {
-      const oHorizontal = oside === "top" || oside === "bottom";
-      if (horizontal !== oHorizontal) continue;
-      const oseg = getEdgeSegment(other, oside);
-      if (horizontal) {
-        if (Math.abs(seg.a.y - oseg.a.y) < EDGE_EPS) {
-          const overlap = Math.min(seg.b.x, oseg.b.x) - Math.max(seg.a.x, oseg.a.x);
-          if (overlap > EDGE_EPS) return true;
-        }
-      } else {
-        if (Math.abs(seg.a.x - oseg.a.x) < EDGE_EPS) {
-          const overlap = Math.min(seg.b.y, oseg.b.y) - Math.max(seg.a.y, oseg.a.y);
-          if (overlap > EDGE_EPS) return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-const edgeKey = (shapeId, side) => `${shapeId}:${side}`;
-
-function distToSegment(pt, a, b) {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const len2 = dx * dx + dy * dy;
-  if (len2 < 1e-10) return Math.hypot(pt.x - a.x, pt.y - a.y);
-  const t = Math.max(0, Math.min(1, ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / len2));
-  return Math.hypot(pt.x - (a.x + t * dx), pt.y - (a.y + t * dy));
 }
 
 const fieldStyle = {
@@ -157,7 +90,27 @@ export default function ThermalBridgesTab({ projectId }) {
   const [activeConditionId, setActiveConditionId] = useState(DEFAULT_CONDITION_ID);
   const [selectedEdge, setSelectedEdge] = useState(null); // { shapeId, side }
 
+  const [solveStatus, setSolveStatus] = useState("idle"); // "idle" | "running" | "done" | "unavailable" | "error"
+  const [solveResult, setSolveResult] = useState(null);
+
   const dragRef = useRef(null); // generic drag state for pan / move / resize / draw
+
+  const handleSolve = async () => {
+    setSolveStatus("running");
+    try {
+      const result = await runThermalSolve(shapes, edgeConditions);
+      if (!result) {
+        setSolveStatus("unavailable");
+        setSolveResult(null);
+        return;
+      }
+      setSolveResult(result);
+      setSolveStatus("done");
+    } catch {
+      setSolveStatus("error");
+      setSolveResult(null);
+    }
+  };
 
   // ─── Persist ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -951,8 +904,33 @@ export default function ThermalBridgesTab({ projectId }) {
           </div>
         )}
 
-        <div style={{ marginTop: "auto", color: "#2d5a8a", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
-          {shapes.length} layer{shapes.length === 1 ? "" : "s"} drawn
+        <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+          <button
+            type="button"
+            style={{ ...buttonStyle(false), width: "100%" }}
+            onClick={handleSolve}
+            disabled={solveStatus === "running" || shapes.length === 0}
+          >
+            {solveStatus === "running" ? "Solving…" : "Run thermal solve"}
+          </button>
+          {solveStatus === "unavailable" && (
+            <div style={{ color: "#fbbf24", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
+              Wasm solver not built. Run <code>npm run build:wasm</code> (requires Emscripten).
+            </div>
+          )}
+          {solveStatus === "error" && (
+            <div style={{ color: "#f47272", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
+              Solve failed — see console for details.
+            </div>
+          )}
+          {solveStatus === "done" && solveResult && (
+            <div style={{ color: "#34d399", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
+              Result grid: {solveResult.cols} × {solveResult.rows} cells @ {solveResult.cellSizeMm}mm
+            </div>
+          )}
+          <div style={{ color: "#2d5a8a", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
+            {shapes.length} layer{shapes.length === 1 ? "" : "s"} drawn
+          </div>
         </div>
       </div>
     </div>

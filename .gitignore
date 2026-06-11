@@ -23,3 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 .claude
+
+# Emscripten build output (run `npm run build:wasm` to generate)
+src/wasm/*.mjs
+src/wasm/*.wasm
