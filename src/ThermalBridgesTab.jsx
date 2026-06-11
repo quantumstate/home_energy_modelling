@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { runThermalSolve } from "./thermalSolver.js";
+import { runThermalSolve, runBuildMesh } from "./thermalSolver.js";
 import {
   MATERIALS,
   CONDITIONS,
@@ -93,6 +93,10 @@ export default function ThermalBridgesTab({ projectId }) {
   const [solveStatus, setSolveStatus] = useState("idle"); // "idle" | "running" | "done" | "unavailable" | "error"
   const [solveResult, setSolveResult] = useState(null);
 
+  const [showMesh, setShowMesh] = useState(false);
+  const [meshStatus, setMeshStatus] = useState("idle"); // "idle" | "loading" | "done" | "unavailable" | "error"
+  const [meshResult, setMeshResult] = useState(null);
+
   const dragRef = useRef(null); // generic drag state for pan / move / resize / draw
 
   const handleSolve = async () => {
@@ -120,6 +124,44 @@ export default function ThermalBridgesTab({ projectId }) {
       // best effort
     }
   }, [shapes, view, edgeConditions, storageKey]);
+
+  // ─── Mesh debug view ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!showMesh) return;
+    let cancelled = false;
+    if (shapes.length === 0) {
+      Promise.resolve().then(() => {
+        if (cancelled) return;
+        setMeshResult(null);
+        setMeshStatus("idle");
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    Promise.resolve().then(() => {
+      if (!cancelled) setMeshStatus("loading");
+    });
+    runBuildMesh(shapes)
+      .then((mesh) => {
+        if (cancelled) return;
+        if (!mesh) {
+          setMeshResult(null);
+          setMeshStatus("unavailable");
+          return;
+        }
+        setMeshResult(mesh);
+        setMeshStatus("done");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setMeshResult(null);
+        setMeshStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showMesh, shapes]);
 
   // Resolves the boundary condition for an edge: shared edges between
   // elements may not have one, external edges default to adiabatic.
@@ -283,6 +325,45 @@ export default function ThermalBridgesTab({ projectId }) {
       renderRect({ ...r, materialId: activeMaterialId, id: "__draft" }, false);
     }
 
+    // mesh debug overlay
+    if (showMesh && meshResult) {
+      const { cellSizeMm, originX, originY, cols, rows, elements } = meshResult;
+      const cellPx = cellSizeMm * scale;
+
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          const el = elements[j * cols + i];
+          const ex = offsetX + (originX + i * cellSizeMm) * scale;
+          const ey = offsetY + (originY + j * cellSizeMm) * scale;
+          if (el.lambda <= 0) {
+            ctx.fillStyle = "#f4727233";
+          } else {
+            const t = Math.max(0, Math.min(1, Math.log10(el.lambda + 1) / Math.log10(51)));
+            const r = Math.round(56 + t * (244 - 56));
+            const g = Math.round(189 - t * (189 - 114));
+            const b = Math.round(248 - t * (248 - 114));
+            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.18)`;
+          }
+          ctx.fillRect(ex, ey, cellPx, cellPx);
+        }
+      }
+
+      ctx.strokeStyle = "#7dd3fc55";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i <= cols; i++) {
+        const x = offsetX + (originX + i * cellSizeMm) * scale;
+        ctx.moveTo(x + 0.5, offsetY + originY * scale);
+        ctx.lineTo(x + 0.5, offsetY + (originY + rows * cellSizeMm) * scale);
+      }
+      for (let j = 0; j <= rows; j++) {
+        const y = offsetY + (originY + j * cellSizeMm) * scale;
+        ctx.moveTo(offsetX + originX * scale, y + 0.5);
+        ctx.lineTo(offsetX + (originX + cols * cellSizeMm) * scale, y + 0.5);
+      }
+      ctx.stroke();
+    }
+
     // boundary condition edges
     if (tool === "boundary") {
       for (const shape of shapes) {
@@ -351,7 +432,7 @@ export default function ThermalBridgesTab({ projectId }) {
       }
       ctx.setLineDash([]);
     }
-  }, [shapes, view, selectedId, draft, activeMaterialId, snapGuides, tool, selectedEdge, getEdgeCondition]);
+  }, [shapes, view, selectedId, draft, activeMaterialId, snapGuides, tool, selectedEdge, getEdgeCondition, showMesh, meshResult]);
 
   useEffect(() => {
     draw();
@@ -709,6 +790,29 @@ export default function ThermalBridgesTab({ projectId }) {
             />
             Snap
           </label>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "0 10px",
+              border: "1px solid #1e3a6b",
+              borderRadius: 4,
+              color: showMesh ? "#7dd3fc" : "#4a7fa5",
+              cursor: "pointer",
+              fontFamily: "monospace",
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={showMesh}
+              onChange={(e) => setShowMesh(e.target.checked)}
+            />
+            Mesh
+          </label>
         </div>
         <div
           style={{
@@ -926,6 +1030,21 @@ export default function ThermalBridgesTab({ projectId }) {
           {solveStatus === "done" && solveResult && (
             <div style={{ color: "#34d399", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
               Result grid: {solveResult.cols} × {solveResult.rows} cells @ {solveResult.cellSizeMm}mm
+            </div>
+          )}
+          {showMesh && meshStatus === "unavailable" && (
+            <div style={{ color: "#fbbf24", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
+              Wasm solver not built. Run <code>npm run build:wasm</code> (requires Emscripten).
+            </div>
+          )}
+          {showMesh && meshStatus === "error" && (
+            <div style={{ color: "#f47272", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
+              Mesh build failed — see console for details.
+            </div>
+          )}
+          {showMesh && meshStatus === "done" && meshResult && (
+            <div style={{ color: "#34d399", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
+              Mesh: {meshResult.cols} × {meshResult.rows} elements @ {meshResult.cellSizeMm}mm
             </div>
           )}
           <div style={{ color: "#2d5a8a", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>

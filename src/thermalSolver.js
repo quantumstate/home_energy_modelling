@@ -51,6 +51,38 @@ function shapesToEdgeConditions(shapes, edgeConditions) {
   return conditions;
 }
 
+// Builds the rectangular FEA mesh for the current cross-section, without
+// running a solve. Useful for a debug view of the mesh the solver will use.
+//
+// Returns { cols, rows, cellSizeMm, originX, originY, nodes, elements }
+// where `nodes` is an array of { x, y } (mm) and `elements` is an array of
+// { n0, n1, n2, n3, lambda } (node indices + conductivity), or null if the
+// wasm module hasn't been built.
+export async function runBuildMesh(shapes, cellSizeMm = 5) {
+  const module = await loadModule();
+  if (!module) return null;
+
+  const layers = new module.LayerVector();
+  for (const layer of shapesToLayers(shapes)) layers.push_back(layer);
+
+  try {
+    const mesh = module.buildMesh(layers, cellSizeMm);
+    const nodes = mesh.nodes.toJs ? mesh.nodes.toJs() : Array.from(mesh.nodes);
+    const elements = mesh.elements.toJs ? mesh.elements.toJs() : Array.from(mesh.elements);
+    return {
+      cols: mesh.cols,
+      rows: mesh.rows,
+      cellSizeMm: mesh.cellSizeMm,
+      originX: mesh.originX,
+      originY: mesh.originY,
+      nodes: nodes.map((n) => ({ x: n.x, y: n.y })),
+      elements: elements.map((e) => ({ n0: e.n0, n1: e.n1, n2: e.n2, n3: e.n3, lambda: e.lambda })),
+    };
+  } finally {
+    layers.delete();
+  }
+}
+
 // Runs the thermal solve for the current cross-section.
 //
 // `shapes` and `edgeConditions` are the same shapes used by the
