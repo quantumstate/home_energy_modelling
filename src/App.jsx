@@ -4,6 +4,7 @@ import ThreeDView from "./ThreeDView.jsx";
 import UValueCalculator from "./UValueCalculator.jsx";
 import HeatSummary from "./HeatSummary.jsx";
 import SolarTab from "./SolarTab.jsx";
+import ThermalBridgesTab from "./ThermalBridgesTab.jsx";
 import ProjectManager from "./ProjectManager.jsx";
 
 const TABS = [
@@ -12,6 +13,7 @@ const TABS = [
   { id: "u-value-calculator", label: "u value calculator" },
   { id: "heat-summary", label: "heat summary" },
   { id: "solar", label: "solar" },
+  { id: "thermal-bridges", label: "Thermal Bridges" },
 ];
 
 function App() {
@@ -114,6 +116,7 @@ function App() {
         {activeTab === "u-value-calculator" && <UValueCalculator projectId={currentProject.id} />}
         {activeTab === "heat-summary" && <HeatSummary projectId={currentProject.id} />}
         {activeTab === "solar" && <SolarTab projectId={currentProject.id} />}
+        {activeTab === "thermal-bridges" && <ThermalBridgesTab projectId={currentProject.id} />}
       </main>
     </div>
   );
