@@ -17,9 +17,22 @@ const MATERIALS = [
   { id: "steel", name: "Steel", color: "#7dd3fc", lambda: 50 },
 ];
 
+// ─── Boundary conditions ────────────────────────────────────────────────────
+const CONDITIONS = [
+  { id: "inside", name: "Inside", temperature: 21, color: "#f97316" },
+  { id: "outside", name: "Outside", temperature: -2, color: "#38bdf8" },
+  { id: "adiabatic", name: "Adiabatic", temperature: null, color: "#6b7280" },
+];
+const DEFAULT_CONDITION_ID = "adiabatic";
+
+const SIDES = ["top", "right", "bottom", "left"];
+const EDGE_EPS = 0.5; // mm tolerance for detecting shared edges
+
 // ─── Geometry ─────────────────────────────────────────────────────────────────
 const GRID_MM = 50; // base grid spacing in mm
 const PX_PER_MM_DEFAULT = 1.5;
+const SNAP_TOLERANCE_PX = 8;
+const EDGE_HIT_TOLERANCE_PX = 6;
 
 const createId = () => `shape-${crypto.randomUUID()}`;
 
@@ -42,6 +55,58 @@ function normalizeRect(x, y, w, h) {
     w: Math.abs(w),
     h: Math.abs(h),
   };
+}
+
+// Returns the world-space line segment for one side of a shape's rectangle.
+function getEdgeSegment(shape, side) {
+  const { x, y, w, h } = shape;
+  switch (side) {
+    case "top": return { a: { x, y }, b: { x: x + w, y } };
+    case "right": return { a: { x: x + w, y }, b: { x: x + w, y: y + h } };
+    case "bottom": return { a: { x, y: y + h }, b: { x: x + w, y: y + h } };
+    case "left": return { a: { x, y }, b: { x, y: y + h } };
+    default: return null;
+  }
+}
+
+// An edge is "shared" (between two elements) if it is collinear with, and
+// overlaps, an edge of another shape. Shared edges may not have a boundary
+// condition assigned.
+function isEdgeShared(shapes, shapeId, side) {
+  const shape = shapes.find((s) => s.id === shapeId);
+  if (!shape) return false;
+  const seg = getEdgeSegment(shape, side);
+  const horizontal = side === "top" || side === "bottom";
+  for (const other of shapes) {
+    if (other.id === shapeId) continue;
+    for (const oside of SIDES) {
+      const oHorizontal = oside === "top" || oside === "bottom";
+      if (horizontal !== oHorizontal) continue;
+      const oseg = getEdgeSegment(other, oside);
+      if (horizontal) {
+        if (Math.abs(seg.a.y - oseg.a.y) < EDGE_EPS) {
+          const overlap = Math.min(seg.b.x, oseg.b.x) - Math.max(seg.a.x, oseg.a.x);
+          if (overlap > EDGE_EPS) return true;
+        }
+      } else {
+        if (Math.abs(seg.a.x - oseg.a.x) < EDGE_EPS) {
+          const overlap = Math.min(seg.b.y, oseg.b.y) - Math.max(seg.a.y, oseg.a.y);
+          if (overlap > EDGE_EPS) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+const edgeKey = (shapeId, side) => `${shapeId}:${side}`;
+
+function distToSegment(pt, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-10) return Math.hypot(pt.x - a.x, pt.y - a.y);
+  const t = Math.max(0, Math.min(1, ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / len2));
+  return Math.hypot(pt.x - (a.x + t * dx), pt.y - (a.y + t * dy));
 }
 
 const fieldStyle = {
@@ -85,17 +150,33 @@ export default function ThermalBridgesTab({ projectId }) {
   const [activeMaterialId, setActiveMaterialId] = useState(MATERIALS[0].id);
   const [selectedId, setSelectedId] = useState(null);
   const [draft, setDraft] = useState(null); // in-progress rect (world mm coords)
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [snapGuides, setSnapGuides] = useState({ x: [], y: [] }); // world mm positions
+
+  const [edgeConditions, setEdgeConditions] = useState(initial?.edgeConditions || {}); // edgeKey -> conditionId
+  const [activeConditionId, setActiveConditionId] = useState(DEFAULT_CONDITION_ID);
+  const [selectedEdge, setSelectedEdge] = useState(null); // { shapeId, side }
 
   const dragRef = useRef(null); // generic drag state for pan / move / resize / draw
 
   // ─── Persist ──────────────────────────────────────────────────────────────
   useEffect(() => {
     try {
-      localStorage.setItem(storageKey, JSON.stringify({ shapes, view }));
+      localStorage.setItem(storageKey, JSON.stringify({ shapes, view, edgeConditions }));
     } catch {
       // best effort
     }
-  }, [shapes, view, storageKey]);
+  }, [shapes, view, edgeConditions, storageKey]);
+
+  // Resolves the boundary condition for an edge: shared edges between
+  // elements may not have one, external edges default to adiabatic.
+  const getEdgeCondition = useCallback(
+    (shapeId, side) => {
+      if (isEdgeShared(shapes, shapeId, side)) return null;
+      return edgeConditions[edgeKey(shapeId, side)] || DEFAULT_CONDITION_ID;
+    },
+    [shapes, edgeConditions]
+  );
 
   // ─── Coordinate helpers ───────────────────────────────────────────────────
   const screenToWorld = useCallback(
@@ -110,6 +191,49 @@ export default function ThermalBridgesTab({ projectId }) {
     const rect = canvasRef.current.getBoundingClientRect();
     return { sx: e.clientX - rect.left, sy: e.clientY - rect.top };
   };
+
+  // ─── Snapping ─────────────────────────────────────────────────────────────
+  // Returns the x/y edges (and grid lines) of every other shape that a dragged
+  // point or edge can snap to.
+  const getSnapCandidates = useCallback(
+    (excludeId) => {
+      const xs = [];
+      const ys = [];
+      for (const s of shapes) {
+        if (s.id === excludeId) continue;
+        xs.push(s.x, s.x + s.w);
+        ys.push(s.y, s.y + s.h);
+      }
+      return { xs, ys };
+    },
+    [shapes]
+  );
+
+  // Snaps `value` to the nearest candidate (or grid line) within tolerance.
+  // Returns { value, guide } where `guide` is the snapped-to position, or null.
+  const snapValue = useCallback(
+    (value, candidates, tol) => {
+      let best = value;
+      let bestDiff = tol;
+      let guide = null;
+      for (const c of candidates) {
+        const diff = Math.abs(value - c);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = c;
+          guide = c;
+        }
+      }
+      const gridSnap = Math.round(value / GRID_MM) * GRID_MM;
+      const gridDiff = Math.abs(value - gridSnap);
+      if (gridDiff < bestDiff) {
+        best = gridSnap;
+        guide = gridSnap;
+      }
+      return { value: best, guide };
+    },
+    []
+  );
 
   // ─── Drawing ──────────────────────────────────────────────────────────────
   const draw = useCallback(() => {
@@ -205,7 +329,76 @@ export default function ThermalBridgesTab({ projectId }) {
       const r = normalizeRect(draft.x, draft.y, draft.w, draft.h);
       renderRect({ ...r, materialId: activeMaterialId, id: "__draft" }, false);
     }
-  }, [shapes, view, selectedId, draft, activeMaterialId]);
+
+    // boundary condition edges
+    if (tool === "boundary") {
+      for (const shape of shapes) {
+        for (const side of SIDES) {
+          const seg = getEdgeSegment(shape, side);
+          const a = { x: offsetX + seg.a.x * scale, y: offsetY + seg.a.y * scale };
+          const b = { x: offsetX + seg.b.x * scale, y: offsetY + seg.b.y * scale };
+          const shared = isEdgeShared(shapes, shape.id, side);
+          const isSelected = selectedEdge && selectedEdge.shapeId === shape.id && selectedEdge.side === side;
+
+          if (shared) {
+            ctx.strokeStyle = "#33415580";
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            continue;
+          }
+
+          const conditionId = getEdgeCondition(shape.id, side);
+          const condition = CONDITIONS.find((c) => c.id === conditionId) || CONDITIONS[CONDITIONS.length - 1];
+          ctx.strokeStyle = condition.color;
+          ctx.lineWidth = isSelected ? 6 : 4;
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+          ctx.lineCap = "butt";
+
+          if (isSelected) {
+            ctx.strokeStyle = "#7dd3fc";
+            ctx.lineWidth = 1.5;
+            ctx.setLineDash([4, 3]);
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        }
+      }
+    }
+
+    // snap guides
+    if (snapGuides.x.length || snapGuides.y.length) {
+      ctx.strokeStyle = "#7dd3fc";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 4]);
+      for (const wx of snapGuides.x) {
+        const x = offsetX + wx * scale;
+        ctx.beginPath();
+        ctx.moveTo(x + 0.5, 0);
+        ctx.lineTo(x + 0.5, cssH);
+        ctx.stroke();
+      }
+      for (const wy of snapGuides.y) {
+        const y = offsetY + wy * scale;
+        ctx.beginPath();
+        ctx.moveTo(0, y + 0.5);
+        ctx.lineTo(cssW, y + 0.5);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+  }, [shapes, view, selectedId, draft, activeMaterialId, snapGuides, tool, selectedEdge, getEdgeCondition]);
 
   useEffect(() => {
     draw();
@@ -229,6 +422,27 @@ export default function ThermalBridgesTab({ projectId }) {
       }
     }
     return null;
+  };
+
+  // Finds the nearest selectable (non-shared) edge to a screen point, within tolerance.
+  const edgeAtPoint = (screenPt) => {
+    const { offsetX, offsetY, scale } = view;
+    let best = null;
+    let bestDist = EDGE_HIT_TOLERANCE_PX;
+    for (const shape of shapes) {
+      for (const side of SIDES) {
+        if (isEdgeShared(shapes, shape.id, side)) continue;
+        const seg = getEdgeSegment(shape, side);
+        const a = { x: offsetX + seg.a.x * scale, y: offsetY + seg.a.y * scale };
+        const b = { x: offsetX + seg.b.x * scale, y: offsetY + seg.b.y * scale };
+        const d = distToSegment({ x: screenPt.sx, y: screenPt.sy }, a, b);
+        if (d < bestDist) {
+          bestDist = d;
+          best = { shapeId: shape.id, side };
+        }
+      }
+    }
+    return best;
   };
 
   const HANDLE_TOLERANCE_PX = 8;
@@ -264,6 +478,16 @@ export default function ThermalBridgesTab({ projectId }) {
       setSelectedId(null);
       setDraft({ x: worldPt.x, y: worldPt.y, w: 0, h: 0 });
       dragRef.current = { mode: "draw", startWorld: worldPt };
+      return;
+    }
+
+    if (tool === "boundary" && e.button === 0) {
+      const edge = edgeAtPoint(screenPt);
+      setSelectedEdge(edge);
+      if (edge) {
+        setEdgeConditions((current) => ({ ...current, [edgeKey(edge.shapeId, edge.side)]: activeConditionId }));
+        dragRef.current = { mode: "paint-boundary" };
+      }
       return;
     }
 
@@ -307,19 +531,77 @@ export default function ThermalBridgesTab({ projectId }) {
       return;
     }
 
+    if (drag.mode === "paint-boundary") {
+      const edge = edgeAtPoint(screenPt);
+      if (edge) {
+        setSelectedEdge(edge);
+        setEdgeConditions((current) => ({ ...current, [edgeKey(edge.shapeId, edge.side)]: activeConditionId }));
+      }
+      return;
+    }
+
+    const tol = SNAP_TOLERANCE_PX / view.scale;
+
     if (drag.mode === "draw") {
+      let { x: wx, y: wy } = worldPt;
+      const guides = { x: [], y: [] };
+      if (snapEnabled) {
+        const { xs, ys } = getSnapCandidates(null);
+        const sx = snapValue(wx, xs, tol);
+        const sy = snapValue(wy, ys, tol);
+        wx = sx.value;
+        wy = sy.value;
+        if (sx.guide !== null) guides.x.push(sx.guide);
+        if (sy.guide !== null) guides.y.push(sy.guide);
+      }
+      setSnapGuides(guides);
       setDraft({
         x: drag.startWorld.x,
         y: drag.startWorld.y,
-        w: worldPt.x - drag.startWorld.x,
-        h: worldPt.y - drag.startWorld.y,
+        w: wx - drag.startWorld.x,
+        h: wy - drag.startWorld.y,
       });
       return;
     }
 
     if (drag.mode === "move") {
-      const dx = worldPt.x - drag.startWorld.x;
-      const dy = worldPt.y - drag.startWorld.y;
+      let dx = worldPt.x - drag.startWorld.x;
+      let dy = worldPt.y - drag.startWorld.y;
+      const guides = { x: [], y: [] };
+      if (snapEnabled) {
+        const { xs, ys } = getSnapCandidates(drag.id);
+        const left = drag.original.x + dx;
+        const right = drag.original.x + drag.original.w + dx;
+        const top = drag.original.y + dy;
+        const bottom = drag.original.y + drag.original.h + dy;
+        const snapLeft = snapValue(left, xs, tol);
+        const snapRight = snapValue(right, xs, tol);
+        const snapTop = snapValue(top, ys, tol);
+        const snapBottom = snapValue(bottom, ys, tol);
+        const dxLeft = snapLeft.value - left;
+        const dxRight = snapRight.value - right;
+        if (dxLeft !== 0 || dxRight !== 0) {
+          if (Math.abs(dxLeft) <= Math.abs(dxRight) && dxLeft !== 0) {
+            dx += dxLeft;
+            guides.x.push(snapLeft.guide);
+          } else {
+            dx += dxRight;
+            guides.x.push(snapRight.guide);
+          }
+        }
+        const dyTop = snapTop.value - top;
+        const dyBottom = snapBottom.value - bottom;
+        if (dyTop !== 0 || dyBottom !== 0) {
+          if (Math.abs(dyTop) <= Math.abs(dyBottom) && dyTop !== 0) {
+            dy += dyTop;
+            guides.y.push(snapTop.guide);
+          } else {
+            dy += dyBottom;
+            guides.y.push(snapBottom.guide);
+          }
+        }
+      }
+      setSnapGuides(guides);
       setShapes((current) =>
         current.map((s) =>
           s.id === drag.id ? { ...s, x: drag.original.x + dx, y: drag.original.y + dy } : s
@@ -330,20 +612,33 @@ export default function ThermalBridgesTab({ projectId }) {
 
     if (drag.mode === "resize") {
       const orig = drag.original;
+      let { x: wx, y: wy } = worldPt;
+      const guides = { x: [], y: [] };
+      if (snapEnabled) {
+        const { xs, ys } = getSnapCandidates(drag.id);
+        const sx = snapValue(wx, xs, tol);
+        const sy = snapValue(wy, ys, tol);
+        wx = sx.value;
+        wy = sy.value;
+        if (sx.guide !== null) guides.x.push(sx.guide);
+        if (sy.guide !== null) guides.y.push(sy.guide);
+      }
+      setSnapGuides(guides);
+
       let { x, y, w, h } = orig;
       if (drag.handle.includes("n")) {
-        h = orig.y + orig.h - worldPt.y;
-        y = worldPt.y;
+        h = orig.y + orig.h - wy;
+        y = wy;
       }
       if (drag.handle.includes("s")) {
-        h = worldPt.y - orig.y;
+        h = wy - orig.y;
       }
       if (drag.handle.includes("w")) {
-        w = orig.x + orig.w - worldPt.x;
-        x = worldPt.x;
+        w = orig.x + orig.w - wx;
+        x = wx;
       }
       if (drag.handle.includes("e")) {
-        w = worldPt.x - orig.x;
+        w = wx - orig.x;
       }
       const norm = normalizeRect(x, y, w, h);
       setShapes((current) => current.map((s) => (s.id === drag.id ? { ...s, ...norm } : s)));
@@ -363,6 +658,7 @@ export default function ThermalBridgesTab({ projectId }) {
       }
       setDraft(null);
     }
+    setSnapGuides({ x: [], y: [] });
     dragRef.current = null;
   };
 
@@ -407,7 +703,7 @@ export default function ThermalBridgesTab({ projectId }) {
       <div ref={containerRef} style={{ flex: 1, position: "relative", minWidth: 0 }}>
         <canvas
           ref={canvasRef}
-          style={{ width: "100%", height: "100%", display: "block", cursor: tool === "rect" ? "crosshair" : "default" }}
+          style={{ width: "100%", height: "100%", display: "block", cursor: tool === "rect" ? "crosshair" : tool === "boundary" ? "pointer" : "default" }}
           onMouseDown={onMouseDown}
           onMouseMove={onMouseMove}
           onMouseUp={onMouseUp}
@@ -434,6 +730,32 @@ export default function ThermalBridgesTab({ projectId }) {
           <button type="button" style={buttonStyle(tool === "select")} onClick={() => setTool("select")}>
             Select
           </button>
+          <button type="button" style={buttonStyle(tool === "boundary")} onClick={() => setTool("boundary")}>
+            Boundary
+          </button>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "0 10px",
+              border: "1px solid #1e3a6b",
+              borderRadius: 4,
+              color: snapEnabled ? "#7dd3fc" : "#4a7fa5",
+              cursor: "pointer",
+              fontFamily: "monospace",
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={snapEnabled}
+              onChange={(e) => setSnapEnabled(e.target.checked)}
+            />
+            Snap
+          </label>
         </div>
         <div
           style={{
@@ -452,6 +774,7 @@ export default function ThermalBridgesTab({ projectId }) {
         >
           Draw: click + drag to add a layer<br />
           Select: drag to move, drag corners to resize, Delete to remove<br />
+          Boundary: pick a condition, then click or drag across edges<br />
           Shift + drag, or scroll to pan / zoom
         </div>
       </div>
@@ -470,6 +793,69 @@ export default function ThermalBridgesTab({ projectId }) {
           gap: 14,
         }}
       >
+        {tool === "boundary" && (
+          <div>
+            <div style={{ color: "#4a7aaa", fontFamily: "monospace", fontSize: 11, letterSpacing: "0.07em", marginBottom: 8, textTransform: "uppercase" }}>
+              Boundary condition
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {CONDITIONS.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveConditionId(c.id);
+                    if (selectedEdge && !isEdgeShared(shapes, selectedEdge.shapeId, selectedEdge.side)) {
+                      setEdgeConditions((current) => ({ ...current, [edgeKey(selectedEdge.shapeId, selectedEdge.side)]: c.id }));
+                    }
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "6px 8px",
+                    background: activeConditionId === c.id ? "#1e4a7a" : "#0a1628",
+                    border: `1px solid ${activeConditionId === c.id ? "#2563eb" : "#1e3a6b"}`,
+                    borderRadius: 4,
+                    color: "#c8d8f0",
+                    cursor: "pointer",
+                    fontFamily: "monospace",
+                    fontSize: 11,
+                    textAlign: "left",
+                  }}
+                >
+                  <span style={{ width: 12, height: 12, borderRadius: 2, background: c.color, flexShrink: 0 }} />
+                  <span style={{ flex: 1 }}>{c.name}</span>
+                  <span style={{ color: "#4a7fa5", fontSize: 10 }}>
+                    {c.temperature !== null ? `${c.temperature}°C` : "—"}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ marginTop: 12, color: "#4a7fa5", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
+              {selectedEdge ? (
+                <>
+                  Selected: {selectedEdge.side} edge<br />
+                  Condition:{" "}
+                  {(() => {
+                    const cid = getEdgeCondition(selectedEdge.shapeId, selectedEdge.side);
+                    const c = CONDITIONS.find((x) => x.id === cid);
+                    return c ? `${c.name}${c.temperature !== null ? ` (${c.temperature}°C)` : ""}` : "—";
+                  })()}
+                </>
+              ) : (
+                <>Click an edge, or drag across several, to apply the selected condition.</>
+              )}
+              <div style={{ marginTop: 8, color: "#2d5a8a" }}>
+                External edges default to adiabatic. Edges shared between two
+                elements (dashed grey) cannot have a boundary condition.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tool !== "boundary" && (
         <div>
           <div style={{ color: "#4a7aaa", fontFamily: "monospace", fontSize: 11, letterSpacing: "0.07em", marginBottom: 8, textTransform: "uppercase" }}>
             Material
@@ -507,8 +893,9 @@ export default function ThermalBridgesTab({ projectId }) {
             ))}
           </div>
         </div>
+        )}
 
-        {selectedShape && (
+        {tool !== "boundary" && selectedShape && (
           <div>
             <div style={{ color: "#4a7aaa", fontFamily: "monospace", fontSize: 11, letterSpacing: "0.07em", marginBottom: 8, textTransform: "uppercase" }}>
               Selected layer
