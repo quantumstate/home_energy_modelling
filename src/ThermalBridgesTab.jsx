@@ -327,14 +327,15 @@ export default function ThermalBridgesTab({ projectId }) {
 
     // mesh debug overlay
     if (showMesh && meshResult) {
-      const { cellSizeMm, originX, originY, cols, rows, elements } = meshResult;
-      const cellPx = cellSizeMm * scale;
+      const { cols, rows, nodes, elements } = meshResult;
+      const nodeCols = cols + 1;
+      const nodeScreen = (n) => ({ x: offsetX + n.x * scale, y: offsetY + n.y * scale });
 
       for (let j = 0; j < rows; j++) {
         for (let i = 0; i < cols; i++) {
           const el = elements[j * cols + i];
-          const ex = offsetX + (originX + i * cellSizeMm) * scale;
-          const ey = offsetY + (originY + j * cellSizeMm) * scale;
+          const topLeft = nodeScreen(nodes[el.n0]);
+          const bottomRight = nodeScreen(nodes[el.n2]);
           if (el.lambda <= 0) {
             ctx.fillStyle = "#f4727233";
           } else {
@@ -344,22 +345,26 @@ export default function ThermalBridgesTab({ projectId }) {
             const b = Math.round(248 - t * (248 - 114));
             ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.18)`;
           }
-          ctx.fillRect(ex, ey, cellPx, cellPx);
+          ctx.fillRect(topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
         }
       }
 
       ctx.strokeStyle = "#7dd3fc55";
       ctx.lineWidth = 1;
       ctx.beginPath();
+      const top = nodeScreen(nodes[0]).y;
+      const bottom = nodeScreen(nodes[rows * nodeCols]).y;
+      const left = nodeScreen(nodes[0]).x;
+      const right = nodeScreen(nodes[cols]).x;
       for (let i = 0; i <= cols; i++) {
-        const x = offsetX + (originX + i * cellSizeMm) * scale;
-        ctx.moveTo(x + 0.5, offsetY + originY * scale);
-        ctx.lineTo(x + 0.5, offsetY + (originY + rows * cellSizeMm) * scale);
+        const x = nodeScreen(nodes[i]).x;
+        ctx.moveTo(x + 0.5, top);
+        ctx.lineTo(x + 0.5, bottom);
       }
       for (let j = 0; j <= rows; j++) {
-        const y = offsetY + (originY + j * cellSizeMm) * scale;
-        ctx.moveTo(offsetX + originX * scale, y + 0.5);
-        ctx.lineTo(offsetX + (originX + cols * cellSizeMm) * scale, y + 0.5);
+        const y = nodeScreen(nodes[j * nodeCols]).y;
+        ctx.moveTo(left, y + 0.5);
+        ctx.lineTo(right, y + 0.5);
       }
       ctx.stroke();
     }

@@ -81,10 +81,36 @@ struct ThermalResult {
   std::vector<double> temperatures;
 };
 
-// Builds a simple rectangular grid mesh covering the bounding box of
-// `layers`, with `cellSizeMm` square cells. Each element is assigned the
-// thermal conductivity of whichever layer's rectangle contains its centre
-// (0 if none, i.e. the cell falls outside every layer).
+// Builds the sorted list of grid-line positions along one axis: every
+// distinct layer-boundary coordinate in `coords`, with the gaps between
+// consecutive boundaries subdivided into roughly `cellSizeMm`-sized steps so
+// every cell aligns exactly with a layer edge.
+std::vector<double> buildMeshAxis(std::vector<double> coords, double cellSizeMm) {
+  std::sort(coords.begin(), coords.end());
+  std::vector<double> axis;
+  axis.push_back(coords.front());
+  const double eps = 1e-6;
+  for (size_t i = 0; i + 1 < coords.size(); ++i) {
+    double a = coords[i];
+    double b = coords[i + 1];
+    double span = b - a;
+    if (span <= eps) continue;
+    int steps = std::max(1, (int)std::ceil(span / cellSizeMm));
+    double step = span / steps;
+    for (int k = 1; k <= steps; ++k) {
+      axis.push_back(a + step * k);
+    }
+  }
+  return axis;
+}
+
+// Builds a rectangular grid mesh covering the bounding box of `layers`, with
+// roughly `cellSizeMm`-sized cells. Grid lines are placed on every layer
+// boundary so cells align exactly with material edges, and the gaps between
+// boundaries are subdivided evenly to stay close to `cellSizeMm`. Each
+// element is assigned the thermal conductivity of whichever layer's
+// rectangle contains its centre (0 if none, i.e. the cell falls outside
+// every layer).
 Mesh buildMesh(const std::vector<Layer>& layers, double cellSizeMm) {
   Mesh mesh;
   mesh.cols = 0;
@@ -95,31 +121,32 @@ Mesh buildMesh(const std::vector<Layer>& layers, double cellSizeMm) {
 
   if (layers.empty() || cellSizeMm <= 0) return mesh;
 
-  double minX = layers[0].x;
-  double minY = layers[0].y;
-  double maxX = layers[0].x + layers[0].w;
-  double maxY = layers[0].y + layers[0].h;
+  std::vector<double> xs, ys;
   for (const auto& layer : layers) {
-    minX = std::min(minX, layer.x);
-    minY = std::min(minY, layer.y);
-    maxX = std::max(maxX, layer.x + layer.w);
-    maxY = std::max(maxY, layer.y + layer.h);
+    xs.push_back(layer.x);
+    xs.push_back(layer.x + layer.w);
+    ys.push_back(layer.y);
+    ys.push_back(layer.y + layer.h);
   }
 
-  int cols = std::max(1, (int)std::ceil((maxX - minX) / cellSizeMm));
-  int rows = std::max(1, (int)std::ceil((maxY - minY) / cellSizeMm));
-  int nodeCols = cols + 1;
+  std::vector<double> nodeXs = buildMeshAxis(xs, cellSizeMm);
+  std::vector<double> nodeYs = buildMeshAxis(ys, cellSizeMm);
+
+  int cols = (int)nodeXs.size() - 1;
+  int rows = (int)nodeYs.size() - 1;
+  if (cols < 1 || rows < 1) return mesh;
 
   mesh.cols = cols;
   mesh.rows = rows;
-  mesh.originX = minX;
-  mesh.originY = minY;
+  mesh.originX = nodeXs.front();
+  mesh.originY = nodeYs.front();
 
   // Nodes: (cols+1) x (rows+1) grid points, row-major from the origin.
+  int nodeCols = cols + 1;
   mesh.nodes.reserve(nodeCols * (rows + 1));
   for (int j = 0; j <= rows; ++j) {
     for (int i = 0; i <= cols; ++i) {
-      mesh.nodes.push_back({minX + i * cellSizeMm, minY + j * cellSizeMm});
+      mesh.nodes.push_back({nodeXs[i], nodeYs[j]});
     }
   }
 
@@ -128,8 +155,8 @@ Mesh buildMesh(const std::vector<Layer>& layers, double cellSizeMm) {
   mesh.elements.reserve(cols * rows);
   for (int j = 0; j < rows; ++j) {
     for (int i = 0; i < cols; ++i) {
-      double cx = minX + (i + 0.5) * cellSizeMm;
-      double cy = minY + (j + 0.5) * cellSizeMm;
+      double cx = (nodeXs[i] + nodeXs[i + 1]) / 2.0;
+      double cy = (nodeYs[j] + nodeYs[j + 1]) / 2.0;
 
       double lambda = 0.0;
       for (const auto& layer : layers) {
