@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from "react";
 import { buildingModelFromState } from "./geometryProcessor.js";
 import { STOREY_LABELS as STOREY_LABELS_CONST, DEFAULT_U_VALUES } from "./constants.js";
 import { recorder } from "./sessionRecorder.js";
@@ -348,6 +348,22 @@ export default function FloorPlanUI({ projectId }) {
     try { const s = localStorage.getItem(pk("floorplan_roofs")); return s ? JSON.parse(s) : { 0:[], 1:[], 2:[] }; }
     catch { return { 0:[], 1:[], 2:[] }; }
   });
+
+  // ── Centre view on existing geometry when opening an existing project ──
+  // useLayoutEffect runs before the browser paints, so the recentred pan
+  // is applied to the very first frame and avoids a visible flicker.
+  useLayoutEffect(() => {
+    const allPts = Object.values(roomsByStorey).flat().flatMap(r => r.points);
+    if (allPts.length === 0) return;
+    const xs = allPts.map(p => p.x), ys = allPts.map(p => p.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+    const W = svgRef.current?.clientWidth || 900, H = svgRef.current?.clientHeight || 600;
+    const np = { x: W / 2 - cx * zoomRef.current * PPM, y: H / 2 - cy * zoomRef.current * PPM };
+    setPan(np); panRef.current = np;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const roofs = roofsByStorey[activeStorey] || [];
   const setRoofs = useCallback((updater) => {
