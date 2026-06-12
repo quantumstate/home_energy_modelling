@@ -440,9 +440,12 @@ export default function ThermalBridgesTab({ projectId }) {
       }
 
       // Pick a "nice" contour interval (1/2/5 x a power of ten) targeting
-      // roughly 6 lines across the value range.
+      // roughly 6 lines across the value range. Treat near-uniform fields as
+      // having no contours to draw, since an arbitrarily small range would
+      // otherwise produce an arbitrarily small (or zero) step and loop
+      // effectively forever below.
       const niceStep = (range) => {
-        if (range <= 0) return 1;
+        if (range < 1e-6) return null;
         const rough = range / 6;
         const mag = Math.pow(10, Math.floor(Math.log10(rough)));
         const norm = rough / mag;
@@ -454,7 +457,7 @@ export default function ThermalBridgesTab({ projectId }) {
         return step * mag;
       };
       const step = niceStep(vMax - vMin);
-      const startLevel = Math.ceil(vMin / step) * step;
+      const startLevel = step !== null ? Math.ceil(vMin / step) * step : 0;
 
       const worldToScreen = (wx, wy) => ({ x: offsetX + wx * scale, y: offsetY + wy * scale });
       const edgePoint = (level, va, vb, pa, pb) => {
@@ -465,7 +468,7 @@ export default function ThermalBridgesTab({ projectId }) {
       ctx.lineWidth = 1.25;
       ctx.font = "10px monospace";
 
-      for (let level = startLevel; level <= vMax + 1e-9; level += step) {
+      for (let level = startLevel; step !== null && level <= vMax + 1e-9; level += step) {
         const segments = [];
         for (let j = 0; j < rows; j++) {
           for (let i = 0; i < cols; i++) {
