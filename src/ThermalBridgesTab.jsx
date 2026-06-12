@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { runThermalSolve, runBuildMesh } from "./thermalSolver.js";
+import { runThermalSolve, runBuildMesh, runBuildMeshWithInitialTemperature } from "./thermalSolver.js";
 import {
   MATERIALS,
   CONDITIONS,
@@ -96,6 +96,7 @@ export default function ThermalBridgesTab({ projectId }) {
   const [showMesh, setShowMesh] = useState(false);
   const [meshStatus, setMeshStatus] = useState("idle"); // "idle" | "loading" | "done" | "unavailable" | "error"
   const [meshResult, setMeshResult] = useState(null);
+  const [meshColorMode, setMeshColorMode] = useState("material"); // "material" | "temperature" | "groupId" | "distance"
 
   const dragRef = useRef(null); // generic drag state for pan / move / resize / draw
 
@@ -142,7 +143,11 @@ export default function ThermalBridgesTab({ projectId }) {
     Promise.resolve().then(() => {
       if (!cancelled) setMeshStatus("loading");
     });
-    runBuildMesh(shapes)
+    const buildPromise =
+      meshColorMode === "material"
+        ? runBuildMesh(shapes)
+        : runBuildMeshWithInitialTemperature(shapes, edgeConditions);
+    buildPromise
       .then((mesh) => {
         if (cancelled) return;
         if (!mesh) {
@@ -161,7 +166,7 @@ export default function ThermalBridgesTab({ projectId }) {
     return () => {
       cancelled = true;
     };
-  }, [showMesh, shapes]);
+  }, [showMesh, shapes, edgeConditions, meshColorMode]);
 
   // Resolves the boundary condition for an edge: shared edges between
   // elements may not have one, external edges default to adiabatic.
@@ -331,19 +336,52 @@ export default function ThermalBridgesTab({ projectId }) {
       const nodeCols = cols + 1;
       const nodeScreen = (n) => ({ x: offsetX + n.x * scale, y: offsetY + n.y * scale });
 
+      // For node-value coloring modes, find the range of the value across
+      // nodes that actually belong to a material (groupId >= 0).
+      let valueMin = 0;
+      let valueMax = 1;
+      if (meshColorMode !== "material") {
+        const key = meshColorMode === "temperature" ? "temperature" : meshColorMode === "distance" ? "boundaryDistance" : "groupId";
+        let first = true;
+        for (const n of nodes) {
+          if (n.groupId < 0) continue;
+          const v = n[key];
+          if (first) { valueMin = v; valueMax = v; first = false; }
+          else { valueMin = Math.min(valueMin, v); valueMax = Math.max(valueMax, v); }
+        }
+        if (valueMax - valueMin < 1e-9) valueMax = valueMin + 1;
+      }
+
+      const valueColor = (v, groupId) => {
+        if (groupId < 0) return "#f4727233";
+        const t = Math.max(0, Math.min(1, (v - valueMin) / (valueMax - valueMin)));
+        const r = Math.round(56 + t * (244 - 56));
+        const g = Math.round(189 - t * (189 - 114));
+        const b = Math.round(248 - t * (248 - 114));
+        return `rgba(${r}, ${g}, ${b}, 0.35)`;
+      };
+
       for (let j = 0; j < rows; j++) {
         for (let i = 0; i < cols; i++) {
           const el = elements[j * cols + i];
           const topLeft = nodeScreen(nodes[el.n0]);
           const bottomRight = nodeScreen(nodes[el.n2]);
-          if (el.lambda <= 0) {
-            ctx.fillStyle = "#f4727233";
+          if (meshColorMode === "material") {
+            if (el.lambda <= 0) {
+              ctx.fillStyle = "#f4727233";
+            } else {
+              const t = Math.max(0, Math.min(1, Math.log10(el.lambda + 1) / Math.log10(51)));
+              const r = Math.round(56 + t * (244 - 56));
+              const g = Math.round(189 - t * (189 - 114));
+              const b = Math.round(248 - t * (248 - 114));
+              ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.18)`;
+            }
           } else {
-            const t = Math.max(0, Math.min(1, Math.log10(el.lambda + 1) / Math.log10(51)));
-            const r = Math.round(56 + t * (244 - 56));
-            const g = Math.round(189 - t * (189 - 114));
-            const b = Math.round(248 - t * (248 - 114));
-            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.18)`;
+            const key = meshColorMode === "temperature" ? "temperature" : meshColorMode === "distance" ? "boundaryDistance" : "groupId";
+            const corners = [nodes[el.n0], nodes[el.n1], nodes[el.n2], nodes[el.n3]];
+            const groupId = Math.max(...corners.map((n) => n.groupId));
+            const value = corners.reduce((sum, n) => sum + n[key], 0) / corners.length;
+            ctx.fillStyle = valueColor(value, groupId);
           }
           ctx.fillRect(topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
         }
@@ -437,7 +475,7 @@ export default function ThermalBridgesTab({ projectId }) {
       }
       ctx.setLineDash([]);
     }
-  }, [shapes, view, selectedId, draft, activeMaterialId, snapGuides, tool, selectedEdge, getEdgeCondition, showMesh, meshResult]);
+  }, [shapes, view, selectedId, draft, activeMaterialId, snapGuides, tool, selectedEdge, getEdgeCondition, showMesh, meshResult, meshColorMode]);
 
   useEffect(() => {
     draw();
@@ -818,6 +856,29 @@ export default function ThermalBridgesTab({ projectId }) {
             />
             Mesh
           </label>
+          {showMesh && (
+            <select
+              value={meshColorMode}
+              onChange={(e) => setMeshColorMode(e.target.value)}
+              style={{
+                background: "#0a1628",
+                border: "1px solid #1e3a6b",
+                borderRadius: 4,
+                color: "#7dd3fc",
+                cursor: "pointer",
+                fontFamily: "monospace",
+                fontSize: 11,
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                padding: "6px 8px",
+              }}
+            >
+              <option value="material">Material</option>
+              <option value="temperature">Initial temperature</option>
+              <option value="groupId">Boundary group</option>
+              <option value="distance">Boundary distance</option>
+            </select>
+          )}
         </div>
         <div
           style={{

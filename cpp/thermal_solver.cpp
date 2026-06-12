@@ -40,6 +40,9 @@ struct EdgeCondition {
 struct MeshNode {
   double x;
   double y;
+  double temperature;  // to be solved for, in degrees Celsius
+  int groupId;          // debug: id of the nearest non-adiabatic boundary group, or -1
+  double boundaryDistance;  // debug: resistance-weighted distance to that boundary
 };
 
 // A quadrilateral element of the mesh, referencing its four corner nodes by
@@ -80,6 +83,8 @@ struct ThermalResult {
   double originY;
   std::vector<double> temperatures;
 };
+
+#include "initial_temperature.h"
 
 // Builds the sorted list of grid-line positions along one axis: every
 // distinct layer-boundary coordinate in `coords`, with the gaps between
@@ -179,6 +184,18 @@ Mesh buildMesh(const std::vector<Layer>& layers, double cellSizeMm) {
   return mesh;
 }
 
+// Builds the mesh and fills in the heuristic initial temperature guess (see
+// initial_temperature.h), without running the full solve. Used by the debug
+// view to inspect the heuristic's output.
+Mesh buildMeshWithInitialTemperature(
+    const std::vector<Layer>& layers,
+    const std::vector<EdgeCondition>& conditions,
+    double cellSizeMm) {
+  Mesh mesh = buildMesh(layers, cellSizeMm);
+  computeInitialTemperatures(mesh, layers, conditions);
+  return mesh;
+}
+
 // Solves for the steady-state temperature field across the cross-section.
 //
 // `cellSizeMm` controls the resolution of the mesh and the returned grid.
@@ -190,6 +207,7 @@ ThermalResult solveThermal(
     const std::vector<EdgeCondition>& conditions,
     double cellSizeMm) {
   Mesh mesh = buildMesh(layers, cellSizeMm);
+  computeInitialTemperatures(mesh, layers, conditions);
 
   ThermalResult result;
   result.cols = 0;
@@ -216,7 +234,10 @@ EMSCRIPTEN_BINDINGS(thermal_solver) {
 
   emscripten::value_object<MeshNode>("MeshNode")
       .field("x", &MeshNode::x)
-      .field("y", &MeshNode::y);
+      .field("y", &MeshNode::y)
+      .field("temperature", &MeshNode::temperature)
+      .field("groupId", &MeshNode::groupId)
+      .field("boundaryDistance", &MeshNode::boundaryDistance);
 
   emscripten::value_object<MeshElement>("MeshElement")
       .field("n0", &MeshElement::n0)
@@ -249,5 +270,6 @@ EMSCRIPTEN_BINDINGS(thermal_solver) {
   emscripten::register_vector<double>("DoubleVector");
 
   emscripten::function("buildMesh", &buildMesh);
+  emscripten::function("buildMeshWithInitialTemperature", &buildMeshWithInitialTemperature);
   emscripten::function("solveThermal", &solveThermal);
 }
