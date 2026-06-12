@@ -121,6 +121,44 @@ export async function runBuildMeshWithInitialTemperature(shapes, edgeConditions,
   }
 }
 
+// Like runBuildMeshWithInitialTemperature, but also refines the heuristic
+// guess toward the steady-state solution (see cpp/steady_state_solver.h).
+// Useful for the debug view.
+export async function runBuildMeshWithSteadyStateTemperature(shapes, edgeConditions, cellSizeMm = 5) {
+  const module = await loadModule();
+  if (!module) return null;
+
+  const layers = new module.LayerVector();
+  for (const layer of shapesToLayers(shapes)) layers.push_back(layer);
+
+  const conditions = new module.EdgeConditionVector();
+  for (const condition of shapesToEdgeConditions(shapes, edgeConditions)) conditions.push_back(condition);
+
+  try {
+    const mesh = module.buildMeshWithSteadyStateTemperature(layers, conditions, cellSizeMm);
+    const nodes = mesh.nodes.toJs ? mesh.nodes.toJs() : Array.from(mesh.nodes);
+    const elements = mesh.elements.toJs ? mesh.elements.toJs() : Array.from(mesh.elements);
+    return {
+      cols: mesh.cols,
+      rows: mesh.rows,
+      cellSizeMm: mesh.cellSizeMm,
+      originX: mesh.originX,
+      originY: mesh.originY,
+      nodes: nodes.map((n) => ({
+        x: n.x,
+        y: n.y,
+        temperature: n.temperature,
+        groupId: n.groupId,
+        boundaryDistance: n.boundaryDistance,
+      })),
+      elements: elements.map((e) => ({ n0: e.n0, n1: e.n1, n2: e.n2, n3: e.n3, lambda: e.lambda })),
+    };
+  } finally {
+    layers.delete();
+    conditions.delete();
+  }
+}
+
 // Runs the thermal solve for the current cross-section.
 //
 // `shapes` and `edgeConditions` are the same shapes used by the
@@ -147,6 +185,8 @@ export async function runThermalSolve(shapes, edgeConditions, cellSizeMm = 5) {
       originX: result.originX,
       originY: result.originY,
       temperatures: result.temperatures.toJs ? result.temperatures.toJs() : Array.from(result.temperatures),
+      iterations: result.iterations,
+      maxResidual: result.maxResidual,
     };
   } finally {
     layers.delete();

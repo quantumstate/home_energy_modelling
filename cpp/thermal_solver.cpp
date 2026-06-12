@@ -82,9 +82,12 @@ struct ThermalResult {
   double originX;
   double originY;
   std::vector<double> temperatures;
+  int iterations;
+  double maxResidual;
 };
 
 #include "initial_temperature.h"
+#include "steady_state_solver.h"
 
 // Builds the sorted list of grid-line positions along one axis: every
 // distinct layer-boundary coordinate in `coords`, with the gaps between
@@ -196,25 +199,54 @@ Mesh buildMeshWithInitialTemperature(
   return mesh;
 }
 
+// Builds the mesh, fills in the heuristic initial temperature guess, and
+// then refines it toward the steady-state solution (see
+// steady_state_solver.h). Used by the debug view to inspect the solver's
+// output.
+Mesh buildMeshWithSteadyStateTemperature(
+    const std::vector<Layer>& layers,
+    const std::vector<EdgeCondition>& conditions,
+    double cellSizeMm) {
+  Mesh mesh = buildMesh(layers, cellSizeMm);
+  auto info = computeInitialTemperatures(mesh, layers, conditions);
+  refineTemperatures(mesh, info);
+  return mesh;
+}
+
 // Solves for the steady-state temperature field across the cross-section.
 //
 // `cellSizeMm` controls the resolution of the mesh and the returned grid.
-//
-// TODO: implement the actual heat-conduction solve over the mesh built by
-// buildMesh(). Currently returns an empty grid.
 ThermalResult solveThermal(
     const std::vector<Layer>& layers,
     const std::vector<EdgeCondition>& conditions,
     double cellSizeMm) {
   Mesh mesh = buildMesh(layers, cellSizeMm);
-  computeInitialTemperatures(mesh, layers, conditions);
+  auto info = computeInitialTemperatures(mesh, layers, conditions);
+  RefineResult rr = refineTemperatures(mesh, info);
 
   ThermalResult result;
-  result.cols = 0;
-  result.rows = 0;
+  result.cols = mesh.cols;
+  result.rows = mesh.rows;
   result.cellSizeMm = cellSizeMm;
   result.originX = mesh.originX;
   result.originY = mesh.originY;
+  result.iterations = rr.iterations;
+  result.maxResidual = rr.maxResidual;
+
+  result.temperatures.assign((size_t)mesh.cols * mesh.rows, 0.0);
+  int nodeCols = mesh.cols + 1;
+  for (int j = 0; j < mesh.rows; ++j) {
+    for (int i = 0; i < mesh.cols; ++i) {
+      int n0 = j * nodeCols + i;
+      int n1 = j * nodeCols + (i + 1);
+      int n2 = (j + 1) * nodeCols + (i + 1);
+      int n3 = (j + 1) * nodeCols + i;
+      double avg = (mesh.nodes[n0].temperature + mesh.nodes[n1].temperature +
+                    mesh.nodes[n2].temperature + mesh.nodes[n3].temperature) / 4.0;
+      result.temperatures[(size_t)j * mesh.cols + i] = avg;
+    }
+  }
+
   return result;
 }
 
@@ -261,7 +293,9 @@ EMSCRIPTEN_BINDINGS(thermal_solver) {
       .field("cellSizeMm", &ThermalResult::cellSizeMm)
       .field("originX", &ThermalResult::originX)
       .field("originY", &ThermalResult::originY)
-      .field("temperatures", &ThermalResult::temperatures);
+      .field("temperatures", &ThermalResult::temperatures)
+      .field("iterations", &ThermalResult::iterations)
+      .field("maxResidual", &ThermalResult::maxResidual);
 
   emscripten::register_vector<Layer>("LayerVector");
   emscripten::register_vector<EdgeCondition>("EdgeConditionVector");
@@ -271,5 +305,6 @@ EMSCRIPTEN_BINDINGS(thermal_solver) {
 
   emscripten::function("buildMesh", &buildMesh);
   emscripten::function("buildMeshWithInitialTemperature", &buildMeshWithInitialTemperature);
+  emscripten::function("buildMeshWithSteadyStateTemperature", &buildMeshWithSteadyStateTemperature);
   emscripten::function("solveThermal", &solveThermal);
 }

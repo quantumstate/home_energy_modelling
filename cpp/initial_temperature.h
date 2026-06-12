@@ -462,13 +462,14 @@ inline void fillRemainingNodes(const Mesh& mesh, const PathResult& pr, const Bou
 
 // Fills mesh.nodes[*].temperature with a heuristic initial guess, and
 // mesh.nodes[*].groupId / boundaryDistance with debug information about the
-// nearest non-adiabatic boundary.
-inline void computeInitialTemperatures(Mesh& mesh, const std::vector<Layer>& layers,
-                                        const std::vector<EdgeCondition>& conditions) {
+// nearest non-adiabatic boundary. Returns the boundary classification so
+// callers (e.g. the steady-state solver) can reuse it.
+inline initial_temperature_detail::BoundaryInfo computeInitialTemperatures(
+    Mesh& mesh, const std::vector<Layer>& layers, const std::vector<EdgeCondition>& conditions) {
   using namespace initial_temperature_detail;
 
   int numNodes = (int)mesh.nodes.size();
-  if (numNodes == 0) return;
+  if (numNodes == 0) return BoundaryInfo{};
 
   for (auto& node : mesh.nodes) {
     node.temperature = 0.0;
@@ -482,7 +483,7 @@ inline void computeInitialTemperatures(Mesh& mesh, const std::vector<Layer>& lay
   for (bool b : info.isBoundary) {
     if (b) { anyBoundary = true; break; }
   }
-  if (!anyBoundary) return;
+  if (!anyBoundary) return info;
 
   double uniformTemp;
   if (allSameTemperature(info, uniformTemp)) {
@@ -490,7 +491,7 @@ inline void computeInitialTemperatures(Mesh& mesh, const std::vector<Layer>& lay
     for (int idx = 0; idx < numNodes; ++idx) {
       if (info.isBoundary[idx]) mesh.nodes[idx].groupId = 0;
     }
-    return;
+    return info;
   }
 
   std::vector<Chain> chains = findBoundaryChains(mesh, info);
@@ -527,4 +528,6 @@ inline void computeInitialTemperatures(Mesh& mesh, const std::vector<Layer>& lay
   fillRemainingNodes(mesh, pr, info, temperature, filled);
 
   for (int idx = 0; idx < numNodes; ++idx) mesh.nodes[idx].temperature = temperature[idx];
+
+  return info;
 }

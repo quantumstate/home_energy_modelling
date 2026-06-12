@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { runThermalSolve, runBuildMesh, runBuildMeshWithInitialTemperature } from "./thermalSolver.js";
+import { runThermalSolve, runBuildMesh, runBuildMeshWithInitialTemperature, runBuildMeshWithSteadyStateTemperature } from "./thermalSolver.js";
 import {
   MATERIALS,
   CONDITIONS,
@@ -96,7 +96,7 @@ export default function ThermalBridgesTab({ projectId }) {
   const [showMesh, setShowMesh] = useState(false);
   const [meshStatus, setMeshStatus] = useState("idle"); // "idle" | "loading" | "done" | "unavailable" | "error"
   const [meshResult, setMeshResult] = useState(null);
-  const [meshColorMode, setMeshColorMode] = useState("material"); // "material" | "temperature" | "groupId" | "distance"
+  const [meshColorMode, setMeshColorMode] = useState("material"); // "material" | "temperature" | "steadyState" | "groupId" | "distance"
 
   const dragRef = useRef(null); // generic drag state for pan / move / resize / draw
 
@@ -146,7 +146,9 @@ export default function ThermalBridgesTab({ projectId }) {
     const buildPromise =
       meshColorMode === "material"
         ? runBuildMesh(shapes)
-        : runBuildMeshWithInitialTemperature(shapes, edgeConditions);
+        : meshColorMode === "steadyState"
+          ? runBuildMeshWithSteadyStateTemperature(shapes, edgeConditions)
+          : runBuildMeshWithInitialTemperature(shapes, edgeConditions);
     buildPromise
       .then((mesh) => {
         if (cancelled) return;
@@ -341,7 +343,7 @@ export default function ThermalBridgesTab({ projectId }) {
       let valueMin = 0;
       let valueMax = 1;
       if (meshColorMode !== "material") {
-        const key = meshColorMode === "temperature" ? "temperature" : meshColorMode === "distance" ? "boundaryDistance" : "groupId";
+        const key = meshColorMode === "temperature" || meshColorMode === "steadyState" ? "temperature" : meshColorMode === "distance" ? "boundaryDistance" : "groupId";
         let first = true;
         for (const n of nodes) {
           if (n.groupId < 0) continue;
@@ -353,12 +355,12 @@ export default function ThermalBridgesTab({ projectId }) {
       }
 
       const valueColor = (v, groupId) => {
-        if (groupId < 0) return "#f4727233";
+        if (groupId < 0) return "#f47272";
         const t = Math.max(0, Math.min(1, (v - valueMin) / (valueMax - valueMin)));
         const r = Math.round(56 + t * (244 - 56));
         const g = Math.round(189 - t * (189 - 114));
         const b = Math.round(248 - t * (248 - 114));
-        return `rgba(${r}, ${g}, ${b}, 0.35)`;
+        return `rgb(${r}, ${g}, ${b})`;
       };
 
       for (let j = 0; j < rows; j++) {
@@ -377,7 +379,7 @@ export default function ThermalBridgesTab({ projectId }) {
               ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.18)`;
             }
           } else {
-            const key = meshColorMode === "temperature" ? "temperature" : meshColorMode === "distance" ? "boundaryDistance" : "groupId";
+            const key = meshColorMode === "temperature" || meshColorMode === "steadyState" ? "temperature" : meshColorMode === "distance" ? "boundaryDistance" : "groupId";
             const corners = [nodes[el.n0], nodes[el.n1], nodes[el.n2], nodes[el.n3]];
             const groupId = Math.max(...corners.map((n) => n.groupId));
             const value = corners.reduce((sum, n) => sum + n[key], 0) / corners.length;
@@ -875,6 +877,7 @@ export default function ThermalBridgesTab({ projectId }) {
             >
               <option value="material">Material</option>
               <option value="temperature">Initial temperature</option>
+              <option value="steadyState">Refined temperature</option>
               <option value="groupId">Boundary group</option>
               <option value="distance">Boundary distance</option>
             </select>
@@ -1096,6 +1099,8 @@ export default function ThermalBridgesTab({ projectId }) {
           {solveStatus === "done" && solveResult && (
             <div style={{ color: "#34d399", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
               Result grid: {solveResult.cols} × {solveResult.rows} cells @ {solveResult.cellSizeMm}mm
+              <br />
+              Converged in {solveResult.iterations} iterations (max Δ {solveResult.maxResidual.toFixed(4)}°C)
             </div>
           )}
           {showMesh && meshStatus === "unavailable" && (
