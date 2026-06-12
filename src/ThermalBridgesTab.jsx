@@ -454,7 +454,7 @@ export default function ThermalBridgesTab({ projectId }) {
       // effectively forever below.
       const niceStep = (range) => {
         if (range < 1e-6) return null;
-        const rough = range / 6;
+        const rough = range / 12;
         const mag = Math.pow(10, Math.floor(Math.log10(rough)));
         const norm = rough / mag;
         let step;
