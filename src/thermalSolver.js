@@ -185,6 +185,7 @@ export async function runThermalSolve(shapes, edgeConditions, cellSizeMm = 5) {
       originX: result.originX,
       originY: result.originY,
       temperatures: result.temperatures.toJs ? result.temperatures.toJs() : Array.from(result.temperatures),
+      lambda: result.lambda.toJs ? result.lambda.toJs() : Array.from(result.lambda),
       iterations: result.iterations,
       maxResidual: result.maxResidual,
     };

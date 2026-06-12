@@ -409,10 +409,13 @@ export default function ThermalBridgesTab({ projectId }) {
 
     // isotherms from the last "Run thermal solve" result
     if (solveStatus === "done" && solveResult && solveResult.cols > 0) {
-      const { cols, rows, cellSizeMm, originX, originY, temperatures } = solveResult;
+      const { cols, rows, cellSizeMm, originX, originY, temperatures, lambda } = solveResult;
+      const hasMaterial = (i, j) => i >= 0 && i < cols && j >= 0 && j < rows && lambda[j * cols + i] > 0;
 
       // Build a (cols+1) x (rows+1) grid of vertex values by averaging the
-      // surrounding cell values, so marching squares can run on the corners.
+      // surrounding in-material cell values, so marching squares can run on
+      // the corners. Vertices with no in-material neighbour are left as NaN
+      // and excluded below.
       const vCols = cols + 1;
       const vRows = rows + 1;
       const vertexValue = new Float64Array(vCols * vRows);
@@ -423,21 +426,26 @@ export default function ThermalBridgesTab({ projectId }) {
           for (const [di, dj] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
             const ci = i + di;
             const cj = j + dj;
-            if (ci >= 0 && ci < cols && cj >= 0 && cj < rows) {
+            if (hasMaterial(ci, cj)) {
               sum += temperatures[cj * cols + ci];
               count += 1;
             }
           }
-          vertexValue[j * vCols + i] = sum / count;
+          vertexValue[j * vCols + i] = count > 0 ? sum / count : NaN;
         }
       }
 
       let vMin = Infinity;
       let vMax = -Infinity;
-      for (const v of vertexValue) {
-        if (v < vMin) vMin = v;
-        if (v > vMax) vMax = v;
+      for (let j = 0; j < rows; j++) {
+        for (let i = 0; i < cols; i++) {
+          if (!hasMaterial(i, j)) continue;
+          const v = temperatures[j * cols + i];
+          if (v < vMin) vMin = v;
+          if (v > vMax) vMax = v;
+        }
       }
+      if (vMin > vMax) { vMin = 0; vMax = 0; }
 
       // Pick a "nice" contour interval (1/2/5 x a power of ten) targeting
       // roughly 6 lines across the value range. Treat near-uniform fields as
@@ -472,6 +480,7 @@ export default function ThermalBridgesTab({ projectId }) {
         const segments = [];
         for (let j = 0; j < rows; j++) {
           for (let i = 0; i < cols; i++) {
+            if (!hasMaterial(i, j)) continue;
             const x0 = originX + i * cellSizeMm;
             const x1 = originX + (i + 1) * cellSizeMm;
             const y0 = originY + j * cellSizeMm;

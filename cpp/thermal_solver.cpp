@@ -82,6 +82,7 @@ struct ThermalResult {
   double originX;
   double originY;
   std::vector<double> temperatures;
+  std::vector<double> lambda;  // per-cell conductivity, 0 = no material
   int iterations;
   double maxResidual;
 };
@@ -234,6 +235,7 @@ ThermalResult solveThermal(
   result.maxResidual = rr.maxResidual;
 
   result.temperatures.assign((size_t)mesh.cols * mesh.rows, 0.0);
+  result.lambda.assign((size_t)mesh.cols * mesh.rows, 0.0);
   int nodeCols = mesh.cols + 1;
   for (int j = 0; j < mesh.rows; ++j) {
     for (int i = 0; i < mesh.cols; ++i) {
@@ -244,6 +246,7 @@ ThermalResult solveThermal(
       double avg = (mesh.nodes[n0].temperature + mesh.nodes[n1].temperature +
                     mesh.nodes[n2].temperature + mesh.nodes[n3].temperature) / 4.0;
       result.temperatures[(size_t)j * mesh.cols + i] = avg;
+      result.lambda[(size_t)j * mesh.cols + i] = mesh.elements[(size_t)j * mesh.cols + i].lambda;
     }
   }
 
@@ -294,6 +297,7 @@ EMSCRIPTEN_BINDINGS(thermal_solver) {
       .field("originX", &ThermalResult::originX)
       .field("originY", &ThermalResult::originY)
       .field("temperatures", &ThermalResult::temperatures)
+      .field("lambda", &ThermalResult::lambda)
       .field("iterations", &ThermalResult::iterations)
       .field("maxResidual", &ThermalResult::maxResidual);
 
