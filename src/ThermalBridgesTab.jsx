@@ -380,21 +380,20 @@ export default function ThermalBridgesTab({ projectId }) {
         return `rgb(${r}, ${g}, ${b})`;
       };
 
+      ctx.strokeStyle = "#7dd3fc55";
+      ctx.lineWidth = 1;
       for (let j = 0; j < rows; j++) {
         for (let i = 0; i < cols; i++) {
           const el = elements[j * cols + i];
+          if (el.lambda <= 0) continue;
           const topLeft = nodeScreen(nodes[el.n0]);
           const bottomRight = nodeScreen(nodes[el.n2]);
           if (meshColorMode === "material") {
-            if (el.lambda <= 0) {
-              ctx.fillStyle = "#f4727233";
-            } else {
-              const t = Math.max(0, Math.min(1, Math.log10(el.lambda + 1) / Math.log10(51)));
-              const r = Math.round(56 + t * (244 - 56));
-              const g = Math.round(189 - t * (189 - 114));
-              const b = Math.round(248 - t * (248 - 114));
-              ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.18)`;
-            }
+            const t = Math.max(0, Math.min(1, Math.log10(el.lambda + 1) / Math.log10(51)));
+            const r = Math.round(56 + t * (244 - 56));
+            const g = Math.round(189 - t * (189 - 114));
+            const b = Math.round(248 - t * (248 - 114));
+            ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.18)`;
           } else {
             const key = meshColorMode === "temperature" || meshColorMode === "steadyState" ? "temperature" : meshColorMode === "distance" ? "boundaryDistance" : "groupId";
             const corners = [nodes[el.n0], nodes[el.n1], nodes[el.n2], nodes[el.n3]];
@@ -403,27 +402,125 @@ export default function ThermalBridgesTab({ projectId }) {
             ctx.fillStyle = valueColor(value, groupId);
           }
           ctx.fillRect(topLeft.x, topLeft.y, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
+          ctx.strokeRect(topLeft.x + 0.5, topLeft.y + 0.5, bottomRight.x - topLeft.x, bottomRight.y - topLeft.y);
+        }
+      }
+    }
+
+    // isotherms from the last "Run thermal solve" result
+    if (solveStatus === "done" && solveResult && solveResult.cols > 0) {
+      const { cols, rows, cellSizeMm, originX, originY, temperatures } = solveResult;
+
+      // Build a (cols+1) x (rows+1) grid of vertex values by averaging the
+      // surrounding cell values, so marching squares can run on the corners.
+      const vCols = cols + 1;
+      const vRows = rows + 1;
+      const vertexValue = new Float64Array(vCols * vRows);
+      for (let j = 0; j < vRows; j++) {
+        for (let i = 0; i < vCols; i++) {
+          let sum = 0;
+          let count = 0;
+          for (const [di, dj] of [[-1, -1], [0, -1], [-1, 0], [0, 0]]) {
+            const ci = i + di;
+            const cj = j + dj;
+            if (ci >= 0 && ci < cols && cj >= 0 && cj < rows) {
+              sum += temperatures[cj * cols + ci];
+              count += 1;
+            }
+          }
+          vertexValue[j * vCols + i] = sum / count;
         }
       }
 
-      ctx.strokeStyle = "#7dd3fc55";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      const top = nodeScreen(nodes[0]).y;
-      const bottom = nodeScreen(nodes[rows * nodeCols]).y;
-      const left = nodeScreen(nodes[0]).x;
-      const right = nodeScreen(nodes[cols]).x;
-      for (let i = 0; i <= cols; i++) {
-        const x = nodeScreen(nodes[i]).x;
-        ctx.moveTo(x + 0.5, top);
-        ctx.lineTo(x + 0.5, bottom);
+      let vMin = Infinity;
+      let vMax = -Infinity;
+      for (const v of vertexValue) {
+        if (v < vMin) vMin = v;
+        if (v > vMax) vMax = v;
       }
-      for (let j = 0; j <= rows; j++) {
-        const y = nodeScreen(nodes[j * nodeCols]).y;
-        ctx.moveTo(left, y + 0.5);
-        ctx.lineTo(right, y + 0.5);
+
+      // Pick a "nice" contour interval (1/2/5 x a power of ten) targeting
+      // roughly 6 lines across the value range.
+      const niceStep = (range) => {
+        if (range <= 0) return 1;
+        const rough = range / 6;
+        const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+        const norm = rough / mag;
+        let step;
+        if (norm < 1.5) step = 1;
+        else if (norm < 3.5) step = 2;
+        else if (norm < 7.5) step = 5;
+        else step = 10;
+        return step * mag;
+      };
+      const step = niceStep(vMax - vMin);
+      const startLevel = Math.ceil(vMin / step) * step;
+
+      const worldToScreen = (wx, wy) => ({ x: offsetX + wx * scale, y: offsetY + wy * scale });
+      const edgePoint = (level, va, vb, pa, pb) => {
+        const t = (level - va) / (vb - va);
+        return [pa[0] + t * (pb[0] - pa[0]), pa[1] + t * (pb[1] - pa[1])];
+      };
+
+      ctx.lineWidth = 1.25;
+      ctx.font = "10px monospace";
+
+      for (let level = startLevel; level <= vMax + 1e-9; level += step) {
+        const segments = [];
+        for (let j = 0; j < rows; j++) {
+          for (let i = 0; i < cols; i++) {
+            const x0 = originX + i * cellSizeMm;
+            const x1 = originX + (i + 1) * cellSizeMm;
+            const y0 = originY + j * cellSizeMm;
+            const y1 = originY + (j + 1) * cellSizeMm;
+            const v00 = vertexValue[j * vCols + i];
+            const v10 = vertexValue[j * vCols + (i + 1)];
+            const v11 = vertexValue[(j + 1) * vCols + (i + 1)];
+            const v01 = vertexValue[(j + 1) * vCols + i];
+
+            const pts = [];
+            if ((v00 < level) !== (v10 < level)) pts.push(edgePoint(level, v00, v10, [x0, y0], [x1, y0]));
+            if ((v10 < level) !== (v11 < level)) pts.push(edgePoint(level, v10, v11, [x1, y0], [x1, y1]));
+            if ((v01 < level) !== (v11 < level)) pts.push(edgePoint(level, v01, v11, [x0, y1], [x1, y1]));
+            if ((v00 < level) !== (v01 < level)) pts.push(edgePoint(level, v00, v01, [x0, y0], [x0, y1]));
+
+            if (pts.length === 2) {
+              segments.push([pts[0], pts[1]]);
+            } else if (pts.length === 4) {
+              const center = (v00 + v10 + v11 + v01) / 4;
+              if (center < level) {
+                segments.push([pts[0], pts[3]]);
+                segments.push([pts[1], pts[2]]);
+              } else {
+                segments.push([pts[0], pts[1]]);
+                segments.push([pts[2], pts[3]]);
+              }
+            }
+          }
+        }
+
+        if (segments.length === 0) continue;
+
+        ctx.strokeStyle = "#f8fafc";
+        ctx.beginPath();
+        for (const [a, b] of segments) {
+          const sa = worldToScreen(a[0], a[1]);
+          const sb = worldToScreen(b[0], b[1]);
+          ctx.moveTo(sa.x, sa.y);
+          ctx.lineTo(sb.x, sb.y);
+        }
+        ctx.stroke();
+
+        // label near the midpoint of a representative segment
+        const [a, b] = segments[Math.floor(segments.length / 2)];
+        const sp = worldToScreen((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+        const label = `${level.toFixed(1)}°C`;
+        const textWidth = ctx.measureText(label).width;
+        ctx.fillStyle = "#070d1acc";
+        ctx.fillRect(sp.x - textWidth / 2 - 2, sp.y - 12, textWidth + 4, 12);
+        ctx.fillStyle = "#f8fafc";
+        ctx.fillText(label, sp.x - textWidth / 2, sp.y - 2);
       }
-      ctx.stroke();
     }
 
     // boundary condition edges
@@ -494,7 +591,7 @@ export default function ThermalBridgesTab({ projectId }) {
       }
       ctx.setLineDash([]);
     }
-  }, [shapes, view, selectedId, draft, activeMaterialId, snapGuides, tool, selectedEdge, getEdgeCondition, showMesh, meshResult, meshColorMode]);
+  }, [shapes, view, selectedId, draft, activeMaterialId, snapGuides, tool, selectedEdge, getEdgeCondition, showMesh, meshResult, meshColorMode, solveStatus, solveResult]);
 
   useEffect(() => {
     draw();
