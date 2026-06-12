@@ -354,12 +354,29 @@ export default function ThermalBridgesTab({ projectId }) {
         if (valueMax - valueMin < 1e-9) valueMax = valueMin + 1;
       }
 
+      // Multi-stop colormap (blue -> cyan -> green -> yellow -> red) for more
+      // perceptual contrast than a 2-stop gradient, so small changes in value
+      // remain visible across the whole range.
+      const colorStops = [
+        [37, 52, 148],
+        [44, 127, 184],
+        [65, 182, 196],
+        [120, 198, 121],
+        [255, 237, 100],
+        [244, 109, 67],
+        [189, 0, 38],
+      ];
       const valueColor = (v, groupId) => {
         if (groupId < 0) return "#f47272";
         const t = Math.max(0, Math.min(1, (v - valueMin) / (valueMax - valueMin)));
-        const r = Math.round(56 + t * (244 - 56));
-        const g = Math.round(189 - t * (189 - 114));
-        const b = Math.round(248 - t * (248 - 114));
+        const scaled = t * (colorStops.length - 1);
+        const i = Math.min(colorStops.length - 2, Math.floor(scaled));
+        const f = scaled - i;
+        const [r0, g0, b0] = colorStops[i];
+        const [r1, g1, b1] = colorStops[i + 1];
+        const r = Math.round(r0 + f * (r1 - r0));
+        const g = Math.round(g0 + f * (g1 - g0));
+        const b = Math.round(b0 + f * (b1 - b0));
         return `rgb(${r}, ${g}, ${b})`;
       };
 
