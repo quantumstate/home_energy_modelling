@@ -85,10 +85,15 @@ struct ThermalResult {
   std::vector<double> lambda;  // per-cell conductivity, 0 = no material
   int iterations;
   double maxResidual;
+  double insideLengthM;   // total exposed length of "inside" boundary, m
+  double insideU;         // effective U-value of "inside" boundary, W/m^2K
+  double outsideLengthM;  // total exposed length of "outside" boundary, m
+  double outsideU;        // effective U-value of "outside" boundary, W/m^2K
 };
 
 #include "initial_temperature.h"
 #include "steady_state_solver.h"
+#include "u_value.h"
 
 // Builds the sorted list of grid-line positions along one axis: every
 // distinct layer-boundary coordinate in `coords`, with the gaps between
@@ -250,6 +255,12 @@ ThermalResult solveThermal(
     }
   }
 
+  UValueResult uValues = computeUValues(mesh, layers, conditions, result.temperatures);
+  result.insideLengthM = uValues.insideLengthM;
+  result.insideU = uValues.insideU;
+  result.outsideLengthM = uValues.outsideLengthM;
+  result.outsideU = uValues.outsideU;
+
   return result;
 }
 
@@ -299,7 +310,11 @@ EMSCRIPTEN_BINDINGS(thermal_solver) {
       .field("temperatures", &ThermalResult::temperatures)
       .field("lambda", &ThermalResult::lambda)
       .field("iterations", &ThermalResult::iterations)
-      .field("maxResidual", &ThermalResult::maxResidual);
+      .field("maxResidual", &ThermalResult::maxResidual)
+      .field("insideLengthM", &ThermalResult::insideLengthM)
+      .field("insideU", &ThermalResult::insideU)
+      .field("outsideLengthM", &ThermalResult::outsideLengthM)
+      .field("outsideU", &ThermalResult::outsideU);
 
   emscripten::register_vector<Layer>("LayerVector");
   emscripten::register_vector<EdgeCondition>("EdgeConditionVector");

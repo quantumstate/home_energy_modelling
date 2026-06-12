@@ -1227,6 +1227,18 @@ export default function ThermalBridgesTab({ projectId }) {
               Result grid: {solveResult.cols} × {solveResult.rows} cells @ {solveResult.cellSizeMm}mm
               <br />
               Converged in {solveResult.iterations} iterations (max Δ {solveResult.maxResidual.toFixed(4)}°C)
+              {solveResult.insideLengthM > 0 && (
+                <>
+                  <br />
+                  Inside boundary: U = {solveResult.insideU.toFixed(3)} W/m²K ({solveResult.insideLengthM.toFixed(3)} m)
+                </>
+              )}
+              {solveResult.outsideLengthM > 0 && (
+                <>
+                  <br />
+                  Outside boundary: U = {solveResult.outsideU.toFixed(3)} W/m²K ({solveResult.outsideLengthM.toFixed(3)} m)
+                </>
+              )}
             </div>
           )}
           {showMesh && meshStatus === "unavailable" && (

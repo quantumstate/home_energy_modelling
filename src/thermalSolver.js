@@ -188,6 +188,10 @@ export async function runThermalSolve(shapes, edgeConditions, cellSizeMm = 5) {
       lambda: result.lambda.toJs ? result.lambda.toJs() : Array.from(result.lambda),
       iterations: result.iterations,
       maxResidual: result.maxResidual,
+      insideLengthM: result.insideLengthM,
+      insideU: result.insideU,
+      outsideLengthM: result.outsideLengthM,
+      outsideU: result.outsideU,
     };
   } finally {
     layers.delete();
