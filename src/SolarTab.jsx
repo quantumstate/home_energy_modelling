@@ -596,11 +596,11 @@ function MonthlyChart({ values, color = "#22c55e", unit = "", height = 70 }) {
         {values.map((v, i) => (
           <div key={i} title={`${MONTHS[i]}: ${v.toFixed(0)} ${unit}`}
             style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
-            <span style={{ fontSize: 6.5, color: "#4a7fa5", fontFamily: "monospace", marginBottom: 2 }}>
+            <span style={{ fontSize: 6.5, lineHeight: 1, color: "#4a7fa5", fontFamily: "monospace", marginBottom: 2 }}>
               {max > 0 ? v.toFixed(0) : ""}
             </span>
             <div style={{
-              width: "100%", background: color,
+              width: "100%", background: color, flexShrink: 0,
               height: max > 0 ? `${Math.max(1, (v / max) * (height - 14))}px` : 0,
               borderRadius: "2px 2px 0 0", opacity: 0.85,
             }} />
