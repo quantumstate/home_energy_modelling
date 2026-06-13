@@ -306,7 +306,9 @@ inline std::vector<int> assignGroupIds(const BoundaryInfo& info, const std::vect
   }
 
   if (!chain.closed) {
-    int mid = (hotPos + coldPos) / 2;
+    // Clamp so neither group is empty even when the hottest and coldest
+    // nodes coincide or sit adjacent to either end of the chain.
+    int mid = std::max(0, std::min((hotPos + coldPos) / 2, n - 2));
     for (int p = 0; p < n; ++p) group[chain.nodes[p]] = (p <= mid) ? 0 : 1;
   } else {
     int lo = std::min(hotPos, coldPos);

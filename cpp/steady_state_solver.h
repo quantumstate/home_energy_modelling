@@ -35,7 +35,7 @@ inline RefineResult refineTemperatures(Mesh& mesh,
     bool forward = (pass % 2) == 0;
     for (int k = 0; k < numNodes; ++k) {
       int idx = forward ? k : numNodes - 1 - k;
-      if (idx < (int)info.isBoundary.size() && info.isBoundary[idx]) continue;
+      if (info.isBoundary[idx]) continue;
 
       double sumG = 0.0;
       double sumGT = 0.0;

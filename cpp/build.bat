@@ -10,6 +10,11 @@ REM   cpp\build.bat
 setlocal
 
 call "%USERPROFILE%\emsdk\emsdk_env.bat" >nul
+if errorlevel 1 (
+  echo Failed to activate the Emscripten SDK at "%USERPROFILE%\emsdk". 1>&2
+  echo Install/configure emsdk, or edit cpp\build.bat if it lives elsewhere. 1>&2
+  exit /b 1
+)
 
 cd /d "%~dp0"
 
