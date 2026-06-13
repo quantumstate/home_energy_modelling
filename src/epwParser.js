@@ -31,6 +31,13 @@
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const HOURLY_DATA_START_LINE = 8; // 0-indexed: lines 0–7 are headers
 
+// Parses a numeric field, falling back to `fallback` for blank/malformed
+// values so they don't poison downstream sums as NaN.
+function parseNumOr(value, fallback) {
+  const n = parseFloat(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -74,9 +81,9 @@ export function parseEPW(text) {
       dryBulb,
       dewPoint:   parseFloat(f[7]),
       rh:         parseFloat(f[8]),
-      ghi:        parseFloat(f[13]), // Wh/m²  — global horiz. radiation
-      dni:        parseFloat(f[14]), // Wh/m²  — direct normal radiation
-      dhi:        parseFloat(f[15]), // Wh/m²  — diffuse horiz. radiation
+      ghi:        parseNumOr(f[13], 0), // Wh/m²  — global horiz. radiation
+      dni:        parseNumOr(f[14], 0), // Wh/m²  — direct normal radiation
+      dhi:        parseNumOr(f[15], 0), // Wh/m²  — diffuse horiz. radiation
       windDir:    parseFloat(f[21]),
       windSpeed:  parseFloat(f[22]),
     });

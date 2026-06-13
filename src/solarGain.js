@@ -127,7 +127,8 @@ export function computeMonthlySolarGains(hourly, location, windowGroups) {
 
   for (const rec of hourly) {
     const { month, day, hour, dni, dhi, ghi } = rec;
-    if ((ghi ?? 0) <= 0 && (dhi ?? 0) <= 0 && (dni ?? 0) <= 0) continue;
+    if (!Number.isFinite(ghi) || !Number.isFinite(dni) || !Number.isFinite(dhi)) continue;
+    if (ghi <= 0 && dhi <= 0 && dni <= 0) continue;
 
     const pos = solarPosition(latitude, longitude, timezone, month, day, hour);
 

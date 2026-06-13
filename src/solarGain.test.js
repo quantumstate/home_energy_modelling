@@ -240,7 +240,7 @@ describe("computeMonthlySolarGains", () => {
     expect(result.annualKwh).toBeLessThan(700);
   });
 
-  it("winter months gain less than summer months for south-facing London glazing", () => {
+  it("December gains more than June for south-facing London glazing at solar noon (lower sun angle wins with single-hour samples)", () => {
     const daysInMonth = [31,28,31,30,31,30,31,31,30,31,30,31];
     const hourly = [];
     for (let m = 1; m <= 12; m++) {
