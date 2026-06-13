@@ -58,8 +58,10 @@ const projectOntoWall = (pt, a, b) => {
   return { t, len: Math.sqrt(len2) };
 };
 
-let _uid = 0;
-const uid = () => `id${++_uid}`;
+// Use crypto.randomUUID() (not a module-level counter) so ids stay unique
+// across dev HMR reloads, which re-execute this module and would otherwise
+// reset a counter and produce colliding ids with rooms already on screen.
+const uid = () => `id${crypto.randomUUID()}`;
 
 // ─── Roof geometry ────────────────────────────────────────────────────────────
 // offsetPolygon and computeRoofLines are imported from roofGeometry.js above.
@@ -349,15 +351,6 @@ export default function FloorPlanUI({ projectId }) {
     catch { return { 0:[], 1:[], 2:[] }; }
   });
 
-  // Seed the shared uid() counter past any ids already present in loaded data,
-  // so newly created elements can't collide with ones restored from storage.
-  useEffect(() => {
-    let maxId = 0;
-    const text = JSON.stringify(roomsByStorey) + JSON.stringify(roofsByStorey);
-    for (const m of text.matchAll(/"id":"id(\d+)"/g)) maxId = Math.max(maxId, parseInt(m[1], 10));
-    if (maxId > _uid) _uid = maxId;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ── Centre view on existing geometry when opening an existing project ──
   // useLayoutEffect runs before the browser paints, so the recentred pan
@@ -432,7 +425,84 @@ export default function FloorPlanUI({ projectId }) {
     setRoofsByStorey({ 0:[], 1:[], 2:[] });
     setSelectedId(null); setSelectedOpening(null); setDraft([]);
     setSelectedRoofId(null); setRoofDraft([]);
+    undoStack.current = []; redoStack.current = []; pendingBase.current = null;
+    if (historyTimer.current) { clearTimeout(historyTimer.current); historyTimer.current = null; }
+    skipHistory.current = true;
+    setUndoAvailable(false); setRedoAvailable(false);
   };
+
+  // ── Undo / Redo ──
+  // Snapshot-based history over the floor plan's drawn geometry (rooms + roofs
+  // per storey). Rapid successive changes (e.g. dragging a vertex) are
+  // coalesced into a single undo step via a short debounce.
+  const undoStack = useRef([]);
+  const redoStack = useRef([]);
+  const skipHistory = useRef(false);
+  const historySnapshot = useRef({ roomsByStorey, roofsByStorey });
+  const pendingBase = useRef(null);
+  const historyTimer = useRef(null);
+  const [undoAvailable, setUndoAvailable] = useState(false);
+  const [redoAvailable, setRedoAvailable] = useState(false);
+
+  useEffect(() => {
+    if (skipHistory.current) {
+      skipHistory.current = false;
+      historySnapshot.current = { roomsByStorey, roofsByStorey };
+      return;
+    }
+    if (pendingBase.current === null) pendingBase.current = historySnapshot.current;
+    historySnapshot.current = { roomsByStorey, roofsByStorey };
+    redoStack.current = [];
+    setRedoAvailable(false);
+    setUndoAvailable(true);
+    if (historyTimer.current) clearTimeout(historyTimer.current);
+    historyTimer.current = setTimeout(() => {
+      undoStack.current.push(pendingBase.current);
+      if (undoStack.current.length > 100) undoStack.current.shift();
+      pendingBase.current = null;
+      historyTimer.current = null;
+    }, 400);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomsByStorey, roofsByStorey]);
+
+  useEffect(() => () => { if (historyTimer.current) clearTimeout(historyTimer.current); }, []);
+
+  const flushHistory = () => {
+    if (historyTimer.current) { clearTimeout(historyTimer.current); historyTimer.current = null; }
+    if (pendingBase.current !== null) {
+      undoStack.current.push(pendingBase.current);
+      if (undoStack.current.length > 100) undoStack.current.shift();
+      pendingBase.current = null;
+    }
+  };
+
+  const undo = useCallback(() => {
+    flushHistory();
+    if (undoStack.current.length === 0) return;
+    const prevState = undoStack.current.pop();
+    redoStack.current.push({ roomsByStorey, roofsByStorey });
+    skipHistory.current = true;
+    setRoomsByStorey(prevState.roomsByStorey);
+    setRoofsByStorey(prevState.roofsByStorey);
+    setSelectedId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null);
+    setUndoAvailable(undoStack.current.length > 0);
+    setRedoAvailable(true);
+    recorder.record("undo");
+  }, [roomsByStorey, roofsByStorey]);
+
+  const redo = useCallback(() => {
+    if (redoStack.current.length === 0) return;
+    const nextState = redoStack.current.pop();
+    flushHistory();
+    undoStack.current.push({ roomsByStorey, roofsByStorey });
+    skipHistory.current = true;
+    setRoomsByStorey(nextState.roomsByStorey);
+    setRoofsByStorey(nextState.roofsByStorey);
+    setSelectedId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null);
+    setUndoAvailable(true);
+    setRedoAvailable(redoStack.current.length > 0);
+    recorder.record("redo");
+  }, [roomsByStorey, roofsByStorey]);
 
   // ── Session recording ──
   // Keep refs so the state getter always reads the latest values without re-registering.
@@ -710,6 +780,8 @@ export default function FloorPlanUI({ projectId }) {
   useEffect(() => {
     const fn = (e) => {
       if (e.target.tagName === "INPUT") return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
       if (e.key === "Escape") { setDraft([]); setRoofDraft([]); setSelectedId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null); recorder.record("key_escape"); }
       if (e.key === "d") { setTool("draw"); recorder.record("tool_change", { tool: "draw" }); }
       if (e.key === "s") { setTool("select"); setDraft([]); setRoofDraft([]); recorder.record("tool_change", { tool: "select" }); }
@@ -747,7 +819,7 @@ export default function FloorPlanUI({ projectId }) {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [draft, roofDraft, tool, rooms, roofs, selectedId, selectedOpening, selectedRoofId, setRooms, setRoofs]);
+  }, [draft, roofDraft, tool, rooms, roofs, selectedId, selectedOpening, selectedRoofId, setRooms, setRoofs, undo, redo]);
 
   // ── Scroll zoom ──
   useEffect(() => {
@@ -1165,7 +1237,7 @@ export default function FloorPlanUI({ projectId }) {
           </div>
         )}
         <div style={{ marginTop:20,color:"#2d5a8a",fontSize:9,letterSpacing:"0.12em",marginBottom:8 }}>SHORTCUTS</div>
-        {[["D","Draw"],["S","Select"],["W","Window"],["R","Door"],["F","Roof"],["Enter","Close polygon"],["Esc","Cancel"],["Del","Delete"]].map(([k,v])=>(
+        {[["D","Draw"],["S","Select"],["W","Window"],["R","Door"],["F","Roof"],["Enter","Close polygon"],["Esc","Cancel"],["Del","Delete"],["⌃Z","Undo"],["⌃⇧Z","Redo"]].map(([k,v])=>(
           <div key={k} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"3px 0",borderBottom:"1px solid #0a1628" }}>
             <span style={{ color:"#1e3a6b",background:"#0a1628",padding:"1px 5px",borderRadius:2,border:"1px solid #132040",fontSize:9 }}>{k}</span>
             <span style={{ color:"#2d5a8a",fontSize:9 }}>{v}</span>
@@ -1203,6 +1275,9 @@ export default function FloorPlanUI({ projectId }) {
         <div style={{ flex:1 }}/>
         <span style={{ fontSize:9,color:"#1e3a6b" }}>{(zoom*100).toFixed(0)}%</span>
         {savedAt&&<span style={{ fontSize:9,color:"#1e4a30",letterSpacing:"0.08em" }}>● SAVED {savedAt.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
+        <button onClick={undo} disabled={!undoAvailable} title="Undo (Ctrl+Z)" style={{ marginLeft:4,padding:"3px 8px",background:"transparent",border:`1px solid ${undoAvailable?"#1e3a6b":"#0f1d35"}`,color:undoAvailable?"#7dd3fc":"#0f1d35",borderRadius:4,cursor:undoAvailable?"pointer":"default",fontSize:9,fontFamily:"monospace" }}>↶ UNDO</button>
+        <button onClick={redo} disabled={!redoAvailable} title="Redo (Ctrl+Shift+Z)" style={{ marginLeft:4,padding:"3px 8px",background:"transparent",border:`1px solid ${redoAvailable?"#1e3a6b":"#0f1d35"}`,color:redoAvailable?"#7dd3fc":"#0f1d35",borderRadius:4,cursor:redoAvailable?"pointer":"default",fontSize:9,fontFamily:"monospace" }}>↷ REDO</button>
+        <div style={{ width:1,height:20,background:"#132040" }}/>
         <button onClick={clearStorage} style={{ marginLeft:4,padding:"3px 8px",background:"transparent",border:"1px solid #1e3a6b",color:"#1e3a6b",borderRadius:4,cursor:"pointer",fontSize:9,fontFamily:"monospace" }}>NEW</button>
         <button onClick={()=>recorder.download()} title="Download session recording for bug reports" style={{ marginLeft:4,padding:"3px 8px",background:"transparent",border:"1px solid #1e4a30",color:"#1e7a40",borderRadius:4,cursor:"pointer",fontSize:9,fontFamily:"monospace" }}>REC ↓</button>
         <button onClick={()=>setShowReplay(true)} title="Open replay panel" style={{ marginLeft:4,padding:"3px 8px",background:showReplay?"#0a2818":"transparent",border:`1px solid ${showReplay?"#1e7a40":"#1e4a30"}`,color:"#1e7a40",borderRadius:4,cursor:"pointer",fontSize:9,fontFamily:"monospace" }}>REPLAY</button>
