@@ -10,9 +10,26 @@
 namespace u_value_detail {
 constexpr double kEps = 1e-6;
 
+// Standard internal/external surface (film) resistances for walls, per BS EN
+// ISO 6946 (m^2 K/W). The solve imposes the boundary condition's air
+// temperature directly on the exposed surface nodes, i.e. it models the
+// construction's conduction resistance only; these are added in series
+// afterwards so the reported U-value matches the conventional definition
+// (1 / (Rsi + R_construction + Rse)).
+constexpr double kRsi = 0.13;
+constexpr double kRse = 0.04;
+
 inline double elementLambdaAt(const Mesh& mesh, int ei, int ej) {
   if (ei < 0 || ei >= mesh.cols || ej < 0 || ej >= mesh.rows) return 0.0;
   return mesh.elements[(size_t)ej * mesh.cols + ei].lambda;
+}
+
+// Combines a conduction-only U-value (from the solved flux) with the
+// standard surface resistances in series. Returns 0 if `conductionU` is 0
+// (no exposed length / no flux).
+inline double applySurfaceResistances(double conductionU) {
+  if (conductionU <= 0) return 0.0;
+  return 1.0 / (1.0 / conductionU + kRsi + kRse);
 }
 }  // namespace u_value_detail
 
@@ -32,8 +49,11 @@ struct UValueResult {
 // For each boundary type ("inside" / "outside"), sums Fourier's-law heat
 // flux Q (W per metre of depth) from every adjacent material cell to the
 // condition's fixed temperature, and the total exposed length L (m) of that
-// boundary type. The effective U-value is Q / (L * deltaT), where deltaT is
-// the difference between the "inside" and "outside" condition temperatures.
+// boundary type. Q / (L * deltaT), where deltaT is the difference between
+// the "inside" and "outside" condition temperatures, gives the construction's
+// conduction-only U-value; the standard internal/external surface
+// resistances (Rsi/Rse) are then added in series to give the conventional
+// U-value (see u_value_detail::applySurfaceResistances).
 inline UValueResult computeUValues(const Mesh& mesh,
                                     const std::vector<Layer>& layers,
                                     const std::vector<EdgeCondition>& conditions,
@@ -138,6 +158,9 @@ inline UValueResult computeUValues(const Mesh& mesh,
 
   result.insideU = result.insideLengthM > kEps ? result.insideU / (result.insideLengthM * deltaT) : 0.0;
   result.outsideU = result.outsideLengthM > kEps ? result.outsideU / (result.outsideLengthM * deltaT) : 0.0;
+
+  result.insideU = applySurfaceResistances(result.insideU);
+  result.outsideU = applySurfaceResistances(result.outsideU);
 
   return result;
 }
