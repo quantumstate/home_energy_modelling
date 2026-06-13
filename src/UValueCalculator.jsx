@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 const STORAGE_KEY = "uvalue_building_elements";
 
@@ -109,6 +109,16 @@ export default function UValueCalculator({ projectId }) {
   const initialElements = useMemo(() => readStoredElements(storageKey) || [createElement("wall", 1)], [storageKey]);
   const [elements, setElements] = useState(initialElements);
   const [activeElementId, setActiveElementId] = useState(initialElements[0].id);
+
+  // Resync local state if the storage key changes (e.g. switching projects)
+  // while this component stays mounted.
+  const prevInitialElements = useRef(initialElements);
+  if (prevInitialElements.current !== initialElements) {
+    prevInitialElements.current = initialElements;
+    setElements(initialElements);
+    setActiveElementId(initialElements[0].id);
+  }
+
   const [newElementType, setNewElementType] = useState("wall");
   const [dropIndex, setDropIndex] = useState(null);
   const [draggedPresetId, setDraggedPresetId] = useState(null);

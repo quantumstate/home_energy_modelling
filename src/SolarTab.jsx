@@ -1,7 +1,6 @@
 import { useState, useMemo, useRef, useEffect } from "react";
-import { parseEPW } from "./epwParser.js";
+import { getKewEPW } from "./epwParser.js";
 import { solarPosition } from "./solarGain.js";
-import kewEPWRaw from "./assets/GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw?raw";
 import {
   offsetPolygon,
   isInsidePoly,
@@ -632,7 +631,7 @@ export default function SolarTab({ projectId }) {
     catch { return 0; }
   }, [projectId]);
 
-  const epw = useMemo(() => parseEPW(kewEPWRaw), []);
+  const epw = useMemo(() => getKewEPW(), []);
 
   const planes = useMemo(() => {
     const result = [];
@@ -694,6 +693,10 @@ export default function SolarTab({ projectId }) {
   const planePanelCounts = useMemo(() => {
     const map = {};
     for (const p of planes) {
+      if (p.key === selectedKey && panelLayout) {
+        map[p.key] = panelLayout.panels.length;
+        continue;
+      }
       const [si, roofId, edgeIdxStr] = p.key.split(':');
       const roofs = roofsByStorey[parseInt(si)] || [];
       const roof = roofs.find(r => r.id === roofId);
@@ -705,7 +708,7 @@ export default function SolarTab({ projectId }) {
       map[p.key] = layout ? layout.panels.length : 0;
     }
     return map;
-  }, [planes, roofsByStorey, panelConfig]);
+  }, [planes, roofsByStorey, panelConfig, selectedKey, panelLayout]);
 
   // Whole-roof aggregate: total panels, capacity and monthly generation.
   const roofSummary = useMemo(() => {

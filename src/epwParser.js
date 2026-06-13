@@ -28,6 +28,8 @@
 //  21  Wind Direction                  °
 //  22  Wind Speed                      m/s
 
+import kewEPWRaw from "./assets/GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw?raw";
+
 const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const HOURLY_DATA_START_LINE = 8; // 0-indexed: lines 0–7 are headers
 
@@ -187,4 +189,17 @@ function computeMonthlyStats(hourly) {
       totalGhiKwh: totalGhi / 1000, // kWh/m²
     };
   });
+}
+
+// ─── Bundled Kew EPW ───────────────────────────────────────────────────────────
+
+let kewEPWCache = null;
+
+/**
+ * Parsed result for the bundled Kew Observatory EPW, shared across components
+ * so it is only parsed once per page load.
+ */
+export function getKewEPW() {
+  if (!kewEPWCache) kewEPWCache = parseEPW(kewEPWRaw);
+  return kewEPWCache;
 }

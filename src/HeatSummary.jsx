@@ -1,8 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from "react";
 import { buildingModelFromState, processBuilding } from "./geometryProcessor.js";
-import { parseEPW, computeHDD, computeMonthlyHDD } from "./epwParser.js";
+import { parseEPW, getKewEPW, computeHDD, computeMonthlyHDD } from "./epwParser.js";
 import { solarPosition, verticalIncident } from "./solarGain.js";
-import kewEPWRaw from "./assets/GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw?raw";
 
 // ─── Load processed building from localStorage ────────────────────────────────
 function loadProcessedBuilding(projectId) {
@@ -291,7 +290,7 @@ export default function HeatSummary({ projectId }) {
   // ── Auto-load bundled Kew EPW on first mount ────────────────────────────────
   useEffect(() => {
     try {
-      const data = parseEPW(kewEPWRaw);
+      const data = getKewEPW();
       setEpwData(data);
       setEpwName("GBR_ENG_Kew.Observatory.037750_TMYx.2011-2025.epw");
     } catch (err) {
@@ -629,7 +628,7 @@ export default function HeatSummary({ projectId }) {
                     </span>
                   </div>
                   <span style={{ color: "#7dd3fc", fontFamily: "monospace", fontSize: 14 }}>
-                    {epwHDD.toFixed(0)}
+                    {epwHDD?.toFixed(0) ?? "—"}
                     <span style={{ fontSize: 9, color: "#2d5a8a", marginLeft: 4 }}>K·day/yr</span>
                   </span>
                 </div>
@@ -655,12 +654,12 @@ export default function HeatSummary({ projectId }) {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div>
                   <span style={{ color: "#7dd3fc", fontFamily: "monospace", fontSize: 18 }}>
-                    {epwHDD.toFixed(0)}
+                    {epwHDD?.toFixed(0) ?? "—"}
                   </span>
                   <span style={{ color: "#2d5a8a", fontSize: 9, marginLeft: 6 }}>K·day/yr</span>
                 </div>
                 <button
-                  onClick={() => { setHddManual(Math.round(epwHDD)); setHddOverride(true); }}
+                  onClick={() => { if (epwHDD != null) setHddManual(Math.round(epwHDD)); setHddOverride(true); }}
                   style={{
                     padding: "4px 10px", background: "transparent",
                     border: "1px solid #1e3a6b", color: "#2d5a8a", borderRadius: 4,
@@ -689,7 +688,7 @@ export default function HeatSummary({ projectId }) {
                       cursor: "pointer", fontSize: 8, fontFamily: "monospace",
                     }}
                   >
-                    ↩ REVERT TO EPW VALUE ({epwHDD.toFixed(0)})
+                    ↩ REVERT TO EPW VALUE ({epwHDD?.toFixed(0) ?? "—"})
                   </button>
                 )}
                 {!epwData && (

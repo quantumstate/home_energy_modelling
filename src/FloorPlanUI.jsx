@@ -349,6 +349,16 @@ export default function FloorPlanUI({ projectId }) {
     catch { return { 0:[], 1:[], 2:[] }; }
   });
 
+  // Seed the shared uid() counter past any ids already present in loaded data,
+  // so newly created elements can't collide with ones restored from storage.
+  useEffect(() => {
+    let maxId = 0;
+    const text = JSON.stringify(roomsByStorey) + JSON.stringify(roofsByStorey);
+    for (const m of text.matchAll(/"id":"id(\d+)"/g)) maxId = Math.max(maxId, parseInt(m[1], 10));
+    if (maxId > _uid) _uid = maxId;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Centre view on existing geometry when opening an existing project ──
   // useLayoutEffect runs before the browser paints, so the recentred pan
   // is applied to the very first frame and avoids a visible flicker.
@@ -383,6 +393,8 @@ export default function FloorPlanUI({ projectId }) {
   };
 
   const rooms = roomsByStorey[activeStorey] || [];
+  const roomsRef = useRef(rooms);
+  useEffect(() => { roomsRef.current = rooms; }, [rooms]);
   const setRooms = useCallback((updater) => {
     setRoomsByStorey(prev => ({
       ...prev,
@@ -508,11 +520,11 @@ export default function FloorPlanUI({ projectId }) {
 
   // ── U-value helpers ──
   const effU = (override, defaultVal) => (override !== null && override !== undefined) ? override : defaultVal;
-  const updateRoomU = (roomId, key, value) => {
+  const updateRoomU = useCallback((roomId, key, value) => {
     recorder.record("uvalue_room", { roomId, key, value });
     setRooms(rs => rs.map(r => r.id === roomId ? { ...r, [key]: value } : r));
-  };
-  const updateWallU = (roomId, wallIdx, value) => {
+  }, [setRooms]);
+  const updateWallU = useCallback((roomId, wallIdx, value) => {
     recorder.record("uvalue_wall", { roomId, wallIdx, value });
     setRooms(rs => rs.map(r => {
       if (r.id !== roomId) return r;
@@ -520,15 +532,15 @@ export default function FloorPlanUI({ projectId }) {
       if (value === null) delete wallUs[wallIdx]; else wallUs[wallIdx] = value;
       return { ...r, wallUs };
     }));
-  };
-  const updateOpeningU = (roomId, openingId, value) => {
+  }, [setRooms]);
+  const updateOpeningU = useCallback((roomId, openingId, value) => {
     recorder.record("uvalue_opening", { roomId, openingId, value });
     setRooms(rs => rs.map(r => {
       if (r.id !== roomId) return r;
       return { ...r, openings: r.openings.map(o => o.id === openingId ? { ...o, uValue: value } : o) };
     }));
-  };
-  const updateOpeningSHGC = (roomId, openingId, value) => {
+  }, [setRooms]);
+  const updateOpeningSHGC = useCallback((roomId, openingId, value) => {
     recorder.record("shgc_opening", { roomId, openingId, value });
     setRooms(rs => rs.map(r => {
       if (r.id !== roomId) return r;
@@ -536,18 +548,18 @@ export default function FloorPlanUI({ projectId }) {
         o.id === openingId ? { ...o, glazing: { ...(o.glazing ?? {}), solarHeatGainCoeff: value } } : o
       )};
     }));
-  };
+  }, [setRooms]);
 
   // ── New room/opening factories ──
-  const newRoom = (draft, rooms, pal) => ({
+  const newRoom = useCallback((draft, rooms, pal) => ({
     id: uid(), name: `Room ${rooms.length+1}`, points: [...draft],
     openings: [], wallUs: {}, floorU: null, roofU: null, ...pal,
-  });
-  const newOpening = (tool, wh) => ({
+  }), []);
+  const newOpening = useCallback((tool, wh) => ({
     id: uid(), type: tool, wallIdx: wh.wallIdx, offset: wh.offset,
     width: OPENING_DEFAULTS[tool].width, height: OPENING_DEFAULTS[tool].height,
     sillHeight: OPENING_DEFAULTS[tool].sillHeight, uValue: null,
-  });
+  }), []);
 
   // ── Mouse ──
   const onMouseMove = useCallback((e) => {
@@ -560,9 +572,9 @@ export default function FloorPlanUI({ projectId }) {
       setRooms(rs => rs.map(r => { if (r.id !== roomId) return r; const pts=[...r.points]; pts[vIdx]=pt; return {...r,points:pts}; }));
       return;
     }
-    if (tool === "window" || tool === "door") setWallHover(findWallHover(raw, rooms, OPENING_DEFAULTS[tool].width));
+    if (tool === "window" || tool === "door") setWallHover(findWallHover(raw, roomsRef.current, OPENING_DEFAULTS[tool].width));
     else setWallHover(null);
-  }, [svgPt, snapPt, tool, rooms, findWallHover, setRooms]);
+  }, [svgPt, snapPt, tool, findWallHover, setRooms]);
 
   const onMouseDown = useCallback((e) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {

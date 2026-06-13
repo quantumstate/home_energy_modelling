@@ -423,12 +423,12 @@ export default function ThreeDView({ projectId }) {
     let isDragging = false;
     let previousMousePosition = { x: 0, y: 0 };
 
-    renderer.domElement.addEventListener("mousedown", (e) => {
+    const onMouseDown = (e) => {
       isDragging = true;
       previousMousePosition = { x: e.clientX, y: e.clientY };
-    });
+    };
 
-    renderer.domElement.addEventListener("mousemove", (e) => {
+    const onMouseMove = (e) => {
       if (isDragging) {
         const deltaX = e.clientX - previousMousePosition.x;
         const deltaY = e.clientY - previousMousePosition.y;
@@ -438,20 +438,25 @@ export default function ThreeDView({ projectId }) {
         camera.lookAt(0, 0, 0);
       }
       previousMousePosition = { x: e.clientX, y: e.clientY };
-    });
+    };
 
-    renderer.domElement.addEventListener("mouseup", () => {
+    const onMouseUp = () => {
       isDragging = false;
-    });
+    };
 
-    renderer.domElement.addEventListener("wheel", (e) => {
+    const onWheel = (e) => {
       e.preventDefault();
       const direction = camera.position.clone().normalize();
       const distance = camera.position.length();
       const newDistance = Math.max(5, Math.min(100, distance + e.deltaY * 0.05));
       camera.position.copy(direction.multiplyScalar(newDistance));
       camera.lookAt(0, 0, 0);
-    });
+    };
+
+    renderer.domElement.addEventListener("mousedown", onMouseDown);
+    renderer.domElement.addEventListener("mousemove", onMouseMove);
+    renderer.domElement.addEventListener("mouseup", onMouseUp);
+    renderer.domElement.addEventListener("wheel", onWheel);
 
     // Animation loop
     let animationId;
@@ -466,10 +471,26 @@ export default function ThreeDView({ projectId }) {
     // Cleanup
     return () => {
       window.removeEventListener("resize", handleResize);
+      renderer.domElement.removeEventListener("mousedown", onMouseDown);
+      renderer.domElement.removeEventListener("mousemove", onMouseMove);
+      renderer.domElement.removeEventListener("mouseup", onMouseUp);
+      renderer.domElement.removeEventListener("wheel", onWheel);
       cancelAnimationFrame(animationId);
       if (mountRef.current && renderer.domElement.parentNode === mountRef.current) {
         mountRef.current.removeChild(renderer.domElement);
       }
+      scene.traverse((obj) => {
+        if (obj.geometry) obj.geometry.dispose();
+        if (obj.material) {
+          const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+          for (const mat of materials) {
+            for (const key of Object.keys(mat)) {
+              if (mat[key]?.isTexture) mat[key].dispose();
+            }
+            mat.dispose();
+          }
+        }
+      });
       renderer.dispose();
     };
   }, []);
