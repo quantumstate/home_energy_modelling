@@ -762,13 +762,17 @@ export default function FloorPlanUI({ projectId }) {
   // ── Geometry snapping ──
   // Priority 1: snap straight onto existing wall geometry — either an
   // endpoint, or any point along a wall (for T-junction/partition walls).
+  // Returns which axes the snap actually constrains: an endpoint or a
+  // diagonal wall constrains both x and y, but a projection onto an
+  // axis-aligned wall only constrains the axis perpendicular to it — the
+  // other axis is left free for axis-snapping (priorities 2 & 3) to combine.
   const wallGeometrySnap = useCallback((pt) => {
     const r = SNAP_PX / (zoomRef.current * PPM);
-    let bestD = r, snapped = null;
+    let bestD = r, snapped = null, lockX = false, lockY = false;
     for (const w of wallsRef.current) {
       for (const ep of [w.a, w.b]) {
         const d = dist(pt, ep);
-        if (d < bestD) { bestD = d; snapped = { x: ep.x, y: ep.y }; }
+        if (d < bestD) { bestD = d; snapped = { x: ep.x, y: ep.y }; lockX = true; lockY = true; }
       }
     }
     for (const w of wallsRef.current) {
@@ -777,9 +781,13 @@ export default function FloorPlanUI({ projectId }) {
         const { t } = projectOntoWall(pt, w.a, w.b);
         bestD = d;
         snapped = { x: w.a.x + t * (w.b.x - w.a.x), y: w.a.y + t * (w.b.y - w.a.y) };
+        const dx = w.b.x - w.a.x, dy = w.b.y - w.a.y;
+        if (Math.abs(dx) < 1e-9) { lockX = true; lockY = false; }
+        else if (Math.abs(dy) < 1e-9) { lockX = false; lockY = true; }
+        else { lockX = true; lockY = true; }
       }
     }
-    return snapped;
+    return snapped ? { point: snapped, lockX, lockY } : null;
   }, []);
 
   // Priorities 2 & 3, applied per-axis: snap to horizontal/vertical relative
@@ -811,9 +819,19 @@ export default function FloorPlanUI({ projectId }) {
   // point (`last`, if any). Grid-snap mode keeps the legacy behaviour;
   // geometry-snap (the default) follows the priority order: existing wall
   // geometry > horizontal/vertical from `last` > alignment with endpoints.
+  // Wall-geometry snapping only locks the axis it actually constrains, so a
+  // projection onto an axis-aligned wall combines with axis-snapping on the
+  // other (free) axis.
   const getSnappedPoint = useCallback((pt, last = null) => {
     if (gridSnap) return snapToExisting(pt) || (snapOn ? snapPt(pt) : pt);
-    return wallGeometrySnap(pt) || (snapOn ? axisSnap(pt, last) : pt);
+    if (!snapOn) return pt;
+    const geo = wallGeometrySnap(pt);
+    if (geo && geo.lockX && geo.lockY) return geo.point;
+    const ax = axisSnap(pt, last);
+    return {
+      x: geo && geo.lockX ? geo.point.x : ax.x,
+      y: geo && geo.lockY ? geo.point.y : ax.y,
+    };
   }, [gridSnap, snapOn, snapToExisting, snapPt, wallGeometrySnap, axisSnap]);
 
   // ── Wall hover (for placing windows/doors) ──
