@@ -12,6 +12,7 @@ const GRID = 0.5;
 const WALL_HOVER_THRESHOLD = 0.35;
 const VERTEX_TOL = 0.05;
 const SNAP_PX = 10; // geometry-snap radius, in screen pixels
+const SRC_PRIORITY = { last: 0, endpoint: 1 };
 
 const OPENING_DEFAULTS = {
   window: { width: 1.2, height: 1.2, sillHeight: 0.9 },
@@ -762,17 +763,19 @@ export default function FloorPlanUI({ projectId }) {
   // ── Geometry snapping ──
   // Priority 1: snap straight onto existing wall geometry — either an
   // endpoint, or any point along a wall (for T-junction/partition walls).
-  // Returns which axes the snap actually constrains: an endpoint or a
-  // diagonal wall constrains both x and y, but a projection onto an
-  // axis-aligned wall only constrains the axis perpendicular to it — the
-  // other axis is left free for axis-snapping (priorities 2 & 3) to combine.
+  // Returns which axes the snap actually constrains: an endpoint constrains
+  // both x and y. A projection onto an axis-aligned wall only constrains the
+  // axis perpendicular to it — the other axis is left free for axis-snapping
+  // (priorities 2 & 3) to combine. A projection onto a diagonal wall
+  // constrains the point to lie on that `line`, but leaves one degree of
+  // freedom (position along the line) for axis-snapping to resolve.
   const wallGeometrySnap = useCallback((pt) => {
     const r = SNAP_PX / (zoomRef.current * PPM);
-    let bestD = r, snapped = null, lockX = false, lockY = false;
+    let bestD = r, snapped = null, lockX = false, lockY = false, line = null;
     for (const w of wallsRef.current) {
       for (const ep of [w.a, w.b]) {
         const d = dist(pt, ep);
-        if (d < bestD) { bestD = d; snapped = { x: ep.x, y: ep.y }; lockX = true; lockY = true; }
+        if (d < bestD) { bestD = d; snapped = { x: ep.x, y: ep.y }; lockX = true; lockY = true; line = null; }
       }
     }
     for (const w of wallsRef.current) {
@@ -782,52 +785,68 @@ export default function FloorPlanUI({ projectId }) {
         bestD = d;
         snapped = { x: w.a.x + t * (w.b.x - w.a.x), y: w.a.y + t * (w.b.y - w.a.y) };
         const dx = w.b.x - w.a.x, dy = w.b.y - w.a.y;
-        if (Math.abs(dx) < 1e-9) { lockX = true; lockY = false; }
-        else if (Math.abs(dy) < 1e-9) { lockX = false; lockY = true; }
-        else { lockX = true; lockY = true; }
+        if (Math.abs(dx) < 1e-9) { lockX = true; lockY = false; line = null; }
+        else if (Math.abs(dy) < 1e-9) { lockX = false; lockY = true; line = null; }
+        else { lockX = false; lockY = false; line = { a: w.a, b: w.b }; }
       }
     }
-    return snapped ? { point: snapped, lockX, lockY } : null;
+    return snapped ? { point: snapped, lockX, lockY, line } : null;
   }, []);
 
   // Priorities 2 & 3, applied per-axis: snap to horizontal/vertical relative
   // to the previous drafted point (`last`), then snap to be aligned with the
   // x/y of any existing wall endpoint. Each axis (x, y) is resolved
   // independently, so e.g. a horizontal snap (which fixes y) doesn't prevent
-  // x from separately snapping into alignment with another endpoint.
+  // x from separately snapping into alignment with another endpoint. Also
+  // reports *how* each axis was snapped (xSrc/ySrc), so a diagonal-wall
+  // projection can pick whichever axis snapped with higher priority and
+  // slide along its line to match it.
   const axisSnap = useCallback((pt, last) => {
     const r = SNAP_PX / (zoomRef.current * PPM);
-    let { x, y } = pt, xDone = false, yDone = false;
+    let { x, y } = pt, xSrc = null, ySrc = null;
 
     if (last) {
-      if (Math.abs(pt.y - last.y) < r) { y = last.y; yDone = true; }
-      if (Math.abs(pt.x - last.x) < r) { x = last.x; xDone = true; }
+      if (Math.abs(pt.y - last.y) < r) { y = last.y; ySrc = "last"; }
+      if (Math.abs(pt.x - last.x) < r) { x = last.x; xSrc = "last"; }
     }
-    if (!xDone || !yDone) {
+    if (!xSrc || !ySrc) {
       let bestXd = r, bestYd = r;
       for (const w of wallsRef.current) {
         for (const ep of [w.a, w.b]) {
-          if (!xDone) { const d = Math.abs(pt.x - ep.x); if (d < bestXd) { bestXd = d; x = ep.x; } }
-          if (!yDone) { const d = Math.abs(pt.y - ep.y); if (d < bestYd) { bestYd = d; y = ep.y; } }
+          if (!xSrc) { const d = Math.abs(pt.x - ep.x); if (d < bestXd) { bestXd = d; x = ep.x; xSrc = "endpoint"; } }
+          if (!ySrc) { const d = Math.abs(pt.y - ep.y); if (d < bestYd) { bestYd = d; y = ep.y; ySrc = "endpoint"; } }
         }
       }
     }
-    return { x, y };
+    return { x, y, xSrc, ySrc };
   }, []);
 
   // Resolve a candidate point under the cursor, given the previous drafted
   // point (`last`, if any). Grid-snap mode keeps the legacy behaviour;
   // geometry-snap (the default) follows the priority order: existing wall
   // geometry > horizontal/vertical from `last` > alignment with endpoints.
-  // Wall-geometry snapping only locks the axis it actually constrains, so a
-  // projection onto an axis-aligned wall combines with axis-snapping on the
-  // other (free) axis.
+  // Wall-geometry snapping only locks the axis (or, for a diagonal wall, the
+  // line) it actually constrains, so it combines with axis-snapping on the
+  // remaining degree of freedom.
   const getSnappedPoint = useCallback((pt, last = null) => {
     if (gridSnap) return snapToExisting(pt) || (snapOn ? snapPt(pt) : pt);
     if (!snapOn) return pt;
     const geo = wallGeometrySnap(pt);
     if (geo && geo.lockX && geo.lockY) return geo.point;
     const ax = axisSnap(pt, last);
+    if (geo && geo.line) {
+      const { a, b } = geo.line;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const xRank = ax.xSrc ? SRC_PRIORITY[ax.xSrc] : Infinity;
+      const yRank = ax.ySrc ? SRC_PRIORITY[ax.ySrc] : Infinity;
+      if (xRank <= yRank && xRank < Infinity) {
+        return { x: ax.x, y: a.y + (ax.x - a.x) * dy / dx };
+      }
+      if (yRank < Infinity) {
+        return { x: a.x + (ax.y - a.y) * dx / dy, y: ax.y };
+      }
+      return geo.point;
+    }
     return {
       x: geo && geo.lockX ? geo.point.x : ax.x,
       y: geo && geo.lockY ? geo.point.y : ax.y,
