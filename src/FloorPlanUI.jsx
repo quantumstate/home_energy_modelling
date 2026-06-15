@@ -723,6 +723,7 @@ export default function FloorPlanUI({ projectId }) {
   const [snapOn,    setSnapOn]    = useState(true);
   const [gridSnap,  setGridSnap]  = useState(false);
   const [snapGuides, setSnapGuides] = useState([]);
+  const [lengthInput, setLengthInput] = useState(""); // typed wall-length override (metres)
   const [showGhost, setShowGhost] = useState(true);
 
   // ── Roof drawing & selection ──
@@ -873,6 +874,22 @@ export default function FloorPlanUI({ projectId }) {
     return { ...point, guides };
   }, [gridSnap, snapOn, snapToExisting, snapPt, wallGeometrySnap, axisSnap]);
 
+  // When a wall length has been typed, the new point is placed exactly
+  // `length` away from `last`, along the cursor direction — but horizontal
+  // and vertical snapping (relative to `last`) still applies to that
+  // direction. No other snapping (wall geometry, endpoint alignment) applies.
+  const lengthSnappedPoint = useCallback((raw, last, length) => {
+    const r = SNAP_PX / (zoomRef.current * PPM);
+    let dx = raw.x - last.x, dy = raw.y - last.y;
+    if (snapOn) {
+      if (Math.abs(dy) < r) dy = 0;
+      if (Math.abs(dx) < r) dx = 0;
+    }
+    let mag = Math.hypot(dx, dy);
+    if (mag < 1e-9) { dx = 1; dy = 0; mag = 1; }
+    return { x: last.x + (dx / mag) * length, y: last.y + (dy / mag) * length };
+  }, [snapOn]);
+
   // ── Wall hover (for placing windows/doors) ──
   const findWallHover = useCallback((cursor, walls, openingWidth) => {
     let best = WALL_HOVER_THRESHOLD, result = null;
@@ -936,10 +953,16 @@ export default function FloorPlanUI({ projectId }) {
     const last = tool === "wall" ? (draft.length ? draft[draft.length-1] : null)
       : tool === "roof" ? (roofDraft.length ? roofDraft[roofDraft.length-1] : null)
       : null;
-    const snapped = getSnappedPoint(raw, last);
-    const pt = { x: snapped.x, y: snapped.y };
+    let pt;
+    if (tool === "wall" && draft.length > 0 && lengthInput) {
+      pt = lengthSnappedPoint(raw, draft[draft.length-1], parseFloat(lengthInput) || 0);
+      setSnapGuides([]);
+    } else {
+      const snapped = getSnappedPoint(raw, last);
+      pt = { x: snapped.x, y: snapped.y };
+      setSnapGuides(snapped.guides);
+    }
     setCursor(pt);
-    setSnapGuides(snapped.guides);
     if (dragVertex.current) {
       const origin = dragVertex.current.point;
       setWalls(ws => ws.map(w => {
@@ -953,7 +976,7 @@ export default function FloorPlanUI({ projectId }) {
     }
     if (tool === "window" || tool === "door") setWallHover(findWallHover(raw, wallsRef.current, OPENING_DEFAULTS[tool].width));
     else setWallHover(null);
-  }, [svgPt, getSnappedPoint, tool, draft, roofDraft, findWallHover, setWalls]);
+  }, [svgPt, getSnappedPoint, tool, draft, roofDraft, findWallHover, setWalls, lengthInput, lengthSnappedPoint]);
 
   const onMouseDown = useCallback((e) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
@@ -975,8 +998,13 @@ export default function FloorPlanUI({ projectId }) {
     const last = tool === "wall" ? (draft.length ? draft[draft.length-1] : null)
       : tool === "roof" ? (roofDraft.length ? roofDraft[roofDraft.length-1] : null)
       : null;
-    const snapped = getSnappedPoint(rawPt, last);
-    const pt = { x: snapped.x, y: snapped.y };
+    let pt;
+    if (tool === "wall" && draft.length > 0 && lengthInput) {
+      pt = lengthSnappedPoint(rawPt, draft[draft.length-1], parseFloat(lengthInput) || 0);
+    } else {
+      const snapped = getSnappedPoint(rawPt, last);
+      pt = { x: snapped.x, y: snapped.y };
+    }
 
     if (tool === "window" || tool === "door") {
       const wh = findWallHover(rawPt, walls, OPENING_DEFAULTS[tool].width);
@@ -1095,7 +1123,8 @@ export default function FloorPlanUI({ projectId }) {
     setWalls(ws => [...ws, newWall]);
     recorder.record("wall_add", { a: last, b: pt });
     setDraft(d => [...d, pt]);
-  }, [tool, getSnappedPoint, svgPt, draft, closeThreshold, walls, openings, areas, setWalls, setOpenings, findWallHover, newOpening, roofDraft, roofs, setRoofs, selectedRoofId]);
+    setLengthInput("");
+  }, [tool, getSnappedPoint, svgPt, draft, closeThreshold, walls, openings, areas, setWalls, setOpenings, findWallHover, newOpening, roofDraft, roofs, setRoofs, selectedRoofId, lengthInput, lengthSnappedPoint]);
 
   const onVertexMouseDown = useCallback((e, point) => {
     if (tool !== "select") return;
@@ -1110,12 +1139,38 @@ export default function FloorPlanUI({ projectId }) {
       if (e.target.tagName === "INPUT") return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
-      if (e.key === "Escape") { setDraft([]); setRoofDraft([]); setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null); recorder.record("key_escape"); }
-      if (e.key === "d") { setTool("wall"); setRoofDraft([]); recorder.record("tool_change", { tool: "wall" }); }
-      if (e.key === "s") { setTool("select"); setDraft([]); setRoofDraft([]); recorder.record("tool_change", { tool: "select" }); }
-      if (e.key === "w") { setTool("window"); setDraft([]); recorder.record("tool_change", { tool: "window" }); }
-      if (e.key === "r") { setTool("door"); setDraft([]); recorder.record("tool_change", { tool: "door" }); }
-      if (e.key === "f") { setTool("roof"); setDraft([]); recorder.record("tool_change", { tool: "roof" }); }
+      if (tool === "wall" && draft.length > 0) {
+        if (/^[0-9]$/.test(e.key) || (e.key === "." && !lengthInput.includes("."))) {
+          setLengthInput(s => s + e.key);
+          return;
+        }
+        if (e.key === "Backspace" && lengthInput) {
+          setLengthInput(s => s.slice(0, -1));
+          return;
+        }
+        if (e.key === "Enter" && lengthInput) {
+          const pt = lengthSnappedPoint(cursor, draft[draft.length-1], parseFloat(lengthInput) || 0);
+          const last = draft[draft.length-1];
+          if (dist(pt, last) >= 0.02) {
+            const newWall = { id: uid(), a: last, b: pt, uValue: null };
+            setWalls(ws => [...ws, newWall]);
+            recorder.record("wall_add", { a: last, b: pt });
+            setDraft(d => [...d, pt]);
+          }
+          setLengthInput("");
+          return;
+        }
+        if (e.key === "Escape" && lengthInput) {
+          setLengthInput("");
+          return;
+        }
+      }
+      if (e.key === "Escape") { setDraft([]); setRoofDraft([]); setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null); setLengthInput(""); recorder.record("key_escape"); }
+      if (e.key === "d") { setTool("wall"); setRoofDraft([]); setLengthInput(""); recorder.record("tool_change", { tool: "wall" }); }
+      if (e.key === "s") { setTool("select"); setDraft([]); setRoofDraft([]); setLengthInput(""); recorder.record("tool_change", { tool: "select" }); }
+      if (e.key === "w") { setTool("window"); setDraft([]); setLengthInput(""); recorder.record("tool_change", { tool: "window" }); }
+      if (e.key === "r") { setTool("door"); setDraft([]); setLengthInput(""); recorder.record("tool_change", { tool: "door" }); }
+      if (e.key === "f") { setTool("roof"); setDraft([]); setLengthInput(""); recorder.record("tool_change", { tool: "roof" }); }
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedOpening) {
           const { openingId } = selectedOpening;
@@ -1136,7 +1191,7 @@ export default function FloorPlanUI({ projectId }) {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [selectedWallId, selectedOpening, selectedRoofId, setWalls, setOpenings, setRoofs, undo, redo]);
+  }, [selectedWallId, selectedOpening, selectedRoofId, setWalls, setOpenings, setRoofs, undo, redo, tool, draft, lengthInput, cursor, lengthSnappedPoint]);
 
   // ── Scroll zoom ──
   useEffect(() => {
@@ -1167,12 +1222,12 @@ export default function FloorPlanUI({ projectId }) {
     return lines;
   };
 
-  const renderMeasurement = (a, b, key) => {
-    const len = dist(a,b); if (len<0.25) return null;
+  const renderMeasurement = (a, b, key, label) => {
+    const len = dist(a,b); if (len<0.25 && !label) return null;
     const mx=(a.x+b.x)/2, my=(a.y+b.y)/2, ang=Math.atan2(b.y-a.y,b.x-a.x)*180/Math.PI;
     const fs=9.5/(zoom*PPM), off=0.14, nx=-(b.y-a.y)/len*off, ny=(b.x-a.x)/len*off;
     const rot=ang>90||ang<-90?ang+180:ang;
-    return <text key={key} x={mx+nx} y={my+ny} fontSize={fs} fill="#4a85b8" textAnchor="middle" dominantBaseline="middle" transform={`rotate(${rot},${mx+nx},${my+ny})`} style={{userSelect:"none",fontFamily:"monospace",pointerEvents:"none"}}>{len.toFixed(2)}m</text>;
+    return <text key={key} x={mx+nx} y={my+ny} fontSize={fs} fill={label?"#facc15":"#4a85b8"} textAnchor="middle" dominantBaseline="middle" transform={`rotate(${rot},${mx+nx},${my+ny})`} style={{userSelect:"none",fontFamily:"monospace",pointerEvents:"none"}}>{label ?? `${len.toFixed(2)}m`}</text>;
   };
 
   // ── Derived ──
@@ -1767,7 +1822,7 @@ export default function FloorPlanUI({ projectId }) {
               return <g>
                 {draft.map((p,i)=>i===0?null:<line key={i} x1={draft[i-1].x} y1={draft[i-1].y} x2={p.x} y2={p.y} stroke="#38bdf8" strokeWidth={lw*2.5} strokeLinecap="round"/>)}
                 <line x1={draft[draft.length-1].x} y1={draft[draft.length-1].y} x2={cursor.x} y2={cursor.y} stroke="#38bdf8" strokeWidth={lw} opacity={0.5} strokeDasharray={`${0.1} ${0.07}`}/>
-                {renderMeasurement(draft[draft.length-1],cursor,"prev")}
+                {renderMeasurement(draft[draft.length-1],cursor,"prev",lengthInput?`${lengthInput}m`:undefined)}
                 {draft.map((p,i)=><circle key={i} cx={p.x} cy={p.y} r={i===0?6/(zoom*PPM):4/(zoom*PPM)} fill={i===0?"#38bdf8":"#1a4060"} stroke="#38bdf8" strokeWidth={lw}/>)}
                 <circle cx={cursor.x} cy={cursor.y} r={3/(zoom*PPM)} fill="#38bdf8" opacity={0.8}/>
               </g>; })()}
