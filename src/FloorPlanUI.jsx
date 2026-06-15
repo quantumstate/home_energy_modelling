@@ -11,6 +11,7 @@ const PPM  = 60;
 const GRID = 0.5;
 const WALL_HOVER_THRESHOLD = 0.35;
 const VERTEX_TOL = 0.05;
+const SNAP_PX = 10; // geometry-snap radius, in screen pixels
 
 const OPENING_DEFAULTS = {
   window: { width: 1.2, height: 1.2, sillHeight: 0.9 },
@@ -708,6 +709,7 @@ export default function FloorPlanUI({ projectId }) {
   const [draft,     setDraft]     = useState([]);
   const [cursor,    setCursor]    = useState({ x:0, y:0 });
   const [snapOn,    setSnapOn]    = useState(true);
+  const [gridSnap,  setGridSnap]  = useState(false);
   const [showGhost, setShowGhost] = useState(true);
 
   // ── Roof drawing & selection ──
@@ -756,6 +758,63 @@ export default function FloorPlanUI({ projectId }) {
     }
     return found;
   }, [closeThreshold]);
+
+  // ── Geometry snapping ──
+  // Priority 1: snap straight onto existing wall geometry — either an
+  // endpoint, or any point along a wall (for T-junction/partition walls).
+  const wallGeometrySnap = useCallback((pt) => {
+    const r = SNAP_PX / (zoomRef.current * PPM);
+    let bestD = r, snapped = null;
+    for (const w of wallsRef.current) {
+      for (const ep of [w.a, w.b]) {
+        const d = dist(pt, ep);
+        if (d < bestD) { bestD = d; snapped = { x: ep.x, y: ep.y }; }
+      }
+    }
+    for (const w of wallsRef.current) {
+      const d = distToSegment(pt, w.a, w.b);
+      if (d < bestD) {
+        const { t } = projectOntoWall(pt, w.a, w.b);
+        bestD = d;
+        snapped = { x: w.a.x + t * (w.b.x - w.a.x), y: w.a.y + t * (w.b.y - w.a.y) };
+      }
+    }
+    return snapped;
+  }, []);
+
+  // Priorities 2 & 3, applied per-axis: snap to horizontal/vertical relative
+  // to the previous drafted point (`last`), then snap to be aligned with the
+  // x/y of any existing wall endpoint. Each axis (x, y) is resolved
+  // independently, so e.g. a horizontal snap (which fixes y) doesn't prevent
+  // x from separately snapping into alignment with another endpoint.
+  const axisSnap = useCallback((pt, last) => {
+    const r = SNAP_PX / (zoomRef.current * PPM);
+    let { x, y } = pt, xDone = false, yDone = false;
+
+    if (last) {
+      if (Math.abs(pt.y - last.y) < r) { y = last.y; yDone = true; }
+      if (Math.abs(pt.x - last.x) < r) { x = last.x; xDone = true; }
+    }
+    if (!xDone || !yDone) {
+      let bestXd = r, bestYd = r;
+      for (const w of wallsRef.current) {
+        for (const ep of [w.a, w.b]) {
+          if (!xDone) { const d = Math.abs(pt.x - ep.x); if (d < bestXd) { bestXd = d; x = ep.x; } }
+          if (!yDone) { const d = Math.abs(pt.y - ep.y); if (d < bestYd) { bestYd = d; y = ep.y; } }
+        }
+      }
+    }
+    return { x, y };
+  }, []);
+
+  // Resolve a candidate point under the cursor, given the previous drafted
+  // point (`last`, if any). Grid-snap mode keeps the legacy behaviour;
+  // geometry-snap (the default) follows the priority order: existing wall
+  // geometry > horizontal/vertical from `last` > alignment with endpoints.
+  const getSnappedPoint = useCallback((pt, last = null) => {
+    if (gridSnap) return snapToExisting(pt) || (snapOn ? snapPt(pt) : pt);
+    return wallGeometrySnap(pt) || (snapOn ? axisSnap(pt, last) : pt);
+  }, [gridSnap, snapOn, snapToExisting, snapPt, wallGeometrySnap, axisSnap]);
 
   // ── Wall hover (for placing windows/doors) ──
   const findWallHover = useCallback((cursor, walls, openingWidth) => {
@@ -816,7 +875,11 @@ export default function FloorPlanUI({ projectId }) {
   const onMouseMove = useCallback((e) => {
     const p = panState.current;
     if (p.active) { const np = { x: p.startPan.x+e.clientX-p.origin.x, y: p.startPan.y+e.clientY-p.origin.y }; setPan(np); panRef.current = np; return; }
-    const raw = svgPt(e), pt = snapToExisting(raw) || snapPt(raw);
+    const raw = svgPt(e);
+    const last = tool === "wall" ? (draft.length ? draft[draft.length-1] : null)
+      : tool === "roof" ? (roofDraft.length ? roofDraft[roofDraft.length-1] : null)
+      : null;
+    const pt = getSnappedPoint(raw, last);
     setCursor(pt);
     if (dragVertex.current) {
       const origin = dragVertex.current.point;
@@ -831,7 +894,7 @@ export default function FloorPlanUI({ projectId }) {
     }
     if (tool === "window" || tool === "door") setWallHover(findWallHover(raw, wallsRef.current, OPENING_DEFAULTS[tool].width));
     else setWallHover(null);
-  }, [svgPt, snapPt, snapToExisting, tool, findWallHover, setWalls]);
+  }, [svgPt, getSnappedPoint, tool, draft, roofDraft, findWallHover, setWalls]);
 
   const onMouseDown = useCallback((e) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
@@ -850,7 +913,10 @@ export default function FloorPlanUI({ projectId }) {
   const onCanvasClick = useCallback((e) => {
     if (panState.current.active) return;
     const rawPt = svgPt(e);
-    const pt = snapToExisting(rawPt) || snapPt(rawPt);
+    const last = tool === "wall" ? (draft.length ? draft[draft.length-1] : null)
+      : tool === "roof" ? (roofDraft.length ? roofDraft[roofDraft.length-1] : null)
+      : null;
+    const pt = getSnappedPoint(rawPt, last);
 
     if (tool === "window" || tool === "door") {
       const wh = findWallHover(rawPt, walls, OPENING_DEFAULTS[tool].width);
@@ -937,7 +1003,7 @@ export default function FloorPlanUI({ projectId }) {
           }
         }
       }
-      const snappedPt = snapPt(rawPt);
+      const snappedPt = pt;
       if (roofDraft.length >= 3 && dist(snappedPt, roofDraft[0]) < closeThreshold) {
         const newRoof = {
           id: uid(), points: [...roofDraft], pitch: ROOF_DEFAULT_PITCH, overhang: 0,
@@ -964,13 +1030,12 @@ export default function FloorPlanUI({ projectId }) {
       recorder.record("wall_start", { pt });
       return;
     }
-    const last = draft[draft.length-1];
     if (dist(pt, last) < 0.02) return;
     const newWall = { id: uid(), a: last, b: pt, uValue: null };
     setWalls(ws => [...ws, newWall]);
     recorder.record("wall_add", { a: last, b: pt });
     setDraft(d => [...d, pt]);
-  }, [tool, snapPt, snapToExisting, svgPt, draft, closeThreshold, walls, openings, areas, setWalls, setOpenings, findWallHover, newOpening, roofDraft, roofs, setRoofs, selectedRoofId]);
+  }, [tool, getSnappedPoint, svgPt, draft, closeThreshold, walls, openings, areas, setWalls, setOpenings, findWallHover, newOpening, roofDraft, roofs, setRoofs, selectedRoofId]);
 
   const onVertexMouseDown = useCallback((e, point) => {
     if (tool !== "select") return;
@@ -1507,6 +1572,9 @@ export default function FloorPlanUI({ projectId }) {
         <div style={{ width:1,height:20,background:"#132040" }}/>
         <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,cursor:"pointer",color:"#2d5a8a",userSelect:"none" }}>
           <input type="checkbox" checked={snapOn} onChange={e=>setSnapOn(e.target.checked)} style={{ accentColor:"#38bdf8" }}/> Snap
+        </label>
+        <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,cursor:"pointer",color:snapOn?"#2d5a8a":"#1a2d40",userSelect:"none" }}>
+          <input type="checkbox" checked={gridSnap} disabled={!snapOn} onChange={e=>setGridSnap(e.target.checked)} style={{ accentColor:"#38bdf8" }}/> Grid
         </label>
         <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,cursor:"pointer",color:activeStorey>0?"#2d5a8a":"#1a2d40",userSelect:"none" }}>
           <input type="checkbox" checked={showGhost} onChange={e=>setShowGhost(e.target.checked)} disabled={activeStorey===0} style={{ accentColor:"#38bdf8" }}/> Ghost
