@@ -24,6 +24,16 @@ function App() {
     return <ProjectManager onOpen={setCurrentProject} />;
   }
 
+  const handleTabChange = (tabId) => {
+    if (activeTab === "floor-plan" && tabId !== "floor-plan") {
+      const valid = localStorage.getItem(`${currentProject.id}_floorplan_valid`);
+      if (valid !== "true" && !window.confirm(
+        "Energy calculations will not be valid until every storey's walls form a closed outer boundary. Leave anyway?"
+      )) return;
+    }
+    setActiveTab(tabId);
+  };
+
   return (
     <div
       style={{
@@ -88,7 +98,7 @@ function App() {
             <button
               key={tab.id}
               type="button"
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => handleTabChange(tab.id)}
               aria-current={isActive ? "page" : undefined}
               style={{
                 height: 30,

@@ -1,14 +1,16 @@
-import { useState, useRef, useCallback, useEffect, useLayoutEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo, useLayoutEffect } from "react";
 import { buildingModelFromState } from "./geometryProcessor.js";
 import { STOREY_LABELS as STOREY_LABELS_CONST, DEFAULT_U_VALUES } from "./constants.js";
 import { recorder } from "./sessionRecorder.js";
 import ReplayPanel from "./ReplayPanel.jsx";
 import { offsetPolygon, computeRoofLines } from "./roofGeometry.js";
+import { findClosedAreas, hasClosedBoundary } from "./wallGraph.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PPM  = 60;
 const GRID = 0.5;
 const WALL_HOVER_THRESHOLD = 0.35;
+const VERTEX_TOL = 0.05;
 
 const OPENING_DEFAULTS = {
   window: { width: 1.2, height: 1.2, sillHeight: 0.9 },
@@ -63,11 +65,54 @@ const projectOntoWall = (pt, a, b) => {
 // reset a counter and produce colliding ids with rooms already on screen.
 const uid = () => `id${crypto.randomUUID()}`;
 
+const areaKey = (wallIds) => [...wallIds].sort().join("|");
+
 // ─── Roof geometry ────────────────────────────────────────────────────────────
 // offsetPolygon and computeRoofLines are imported from roofGeometry.js above.
 
-const ROOF_COLOR  = { fill: "#f59e0b", line: "#f59e0b", label: "#fde68a" };
 const ROOF_DEFAULT_PITCH = 35;
+
+// ─── Migration: legacy room-polygon data → wall graph ──────────────────────────
+function migrateRoomsToWalls(roomsByStorey) {
+  const wallsByStorey = {}, openingsByStorey = {}, areaMetaByStorey = {};
+  for (const storey of Object.keys(roomsByStorey)) {
+    const walls = [], openings = [], areaMeta = {};
+    const close = (p, q) => Math.abs(p.x-q.x) < VERTEX_TOL && Math.abs(p.y-q.y) < VERTEX_TOL;
+    const findWall = (a, b) => walls.find(w =>
+      (close(w.a, a) && close(w.b, b)) || (close(w.a, b) && close(w.b, a)));
+    for (const room of (roomsByStorey[storey] || [])) {
+      const pts = room.points || [];
+      const wallIds = [];
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i], b = pts[(i+1) % pts.length];
+        let w = findWall(a, b);
+        if (!w) {
+          w = { id: uid(), a, b, uValue: room.wallUs?.[i] ?? null };
+          walls.push(w);
+        }
+        wallIds.push(w.id);
+        for (const o of (room.openings || []).filter(o => o.wallIdx === i)) {
+          let offset = o.offset;
+          if (!close(w.a, a)) offset = dist(w.a, w.b) - o.offset - o.width;
+          openings.push({ id: o.id, wallId: w.id, type: o.type, offset,
+            width: o.width, height: o.height, sillHeight: o.sillHeight,
+            uValue: o.uValue, glazing: o.glazing });
+        }
+      }
+      if (wallIds.length) {
+        areaMeta[areaKey(wallIds)] = {
+          name: room.name, use: room.use, isHeated: room.isHeated,
+          floorU: room.floorU, roofU: room.roofU,
+          bg: room.bg, line: room.line, label: room.label,
+        };
+      }
+    }
+    wallsByStorey[storey] = walls;
+    openingsByStorey[storey] = openings;
+    areaMetaByStorey[storey] = areaMeta;
+  }
+  return { wallsByStorey, openingsByStorey, areaMetaByStorey };
+}
 
 // ─── Opening symbols ──────────────────────────────────────────────────────────
 function wallWithOpenings(ptA, ptB, openings, wallColor, lw, isPreview) {
@@ -329,10 +374,35 @@ export default function FloorPlanUI({ projectId }) {
   const STOREY_LABELS = STOREY_LABELS_CONST;
   const [activeStorey, setActiveStorey] = useState(0);
 
-  const [roomsByStorey, setRoomsByStorey] = useState(() => {
-    try { const s = localStorage.getItem(pk("floorplan_rooms")); return s ? JSON.parse(s) : { 0:[], 1:[], 2:[] }; }
-    catch { return { 0:[], 1:[], 2:[] }; }
+  // ── Wall-graph state (source of truth) ──
+  const [wallsByStorey, setWallsByStorey] = useState(() => {
+    try {
+      const s = localStorage.getItem(pk("floorplan_walls"));
+      if (s) return JSON.parse(s);
+      const legacy = localStorage.getItem(pk("floorplan_rooms"));
+      if (legacy) return migrateRoomsToWalls(JSON.parse(legacy)).wallsByStorey;
+      return { 0:[], 1:[], 2:[] };
+    } catch { return { 0:[], 1:[], 2:[] }; }
   });
+  const [openingsByStorey, setOpeningsByStorey] = useState(() => {
+    try {
+      const s = localStorage.getItem(pk("floorplan_openings"));
+      if (s) return JSON.parse(s);
+      const legacy = localStorage.getItem(pk("floorplan_rooms"));
+      if (legacy) return migrateRoomsToWalls(JSON.parse(legacy)).openingsByStorey;
+      return { 0:[], 1:[], 2:[] };
+    } catch { return { 0:[], 1:[], 2:[] }; }
+  });
+  const [areaMetaByStorey, setAreaMetaByStorey] = useState(() => {
+    try {
+      const s = localStorage.getItem(pk("floorplan_area_meta"));
+      if (s) return JSON.parse(s);
+      const legacy = localStorage.getItem(pk("floorplan_rooms"));
+      if (legacy) return migrateRoomsToWalls(JSON.parse(legacy)).areaMetaByStorey;
+      return { 0:{}, 1:{}, 2:{} };
+    } catch { return { 0:{}, 1:{}, 2:{} }; }
+  });
+
   const [ceilingHeights, setCeilingHeights] = useState(() => {
     try { const s = localStorage.getItem(pk("floorplan_ceilings")); return s ? JSON.parse(s) : { 0:3.0, 1:2.7, 2:2.5 }; }
     catch { return { 0:3.0, 1:2.7, 2:2.5 }; }
@@ -351,12 +421,87 @@ export default function FloorPlanUI({ projectId }) {
     catch { return { 0:[], 1:[], 2:[] }; }
   });
 
+  // ── Derived areas (rooms) from wall graph ──
+  const derivedAreasByStorey = useMemo(() => {
+    const result = {};
+    for (let s = 0; s < STOREY_LABELS.length; s++) {
+      const sWalls = wallsByStorey[s] || [];
+      const sOpenings = openingsByStorey[s] || [];
+      const meta = areaMetaByStorey[s] || {};
+      const faces = findClosedAreas(sWalls);
+      result[s] = faces.map((face, idx) => {
+        const key = areaKey(face.wallIds);
+        const m = meta[key] || {};
+        const pal = PALETTE[idx % PALETTE.length];
+        const wallUs = {};
+        const faceOpenings = [];
+        face.wallIds.forEach((wid, i) => {
+          const w = sWalls.find(ww => ww.id === wid);
+          if (w && w.uValue != null) wallUs[i] = w.uValue;
+          for (const o of sOpenings.filter(oo => oo.wallId === wid)) {
+            faceOpenings.push({ ...o, wallIdx: i });
+          }
+        });
+        return {
+          id: key,
+          wallIds: face.wallIds,
+          name: m.name || `Room ${idx+1}`,
+          points: face.points,
+          openings: faceOpenings,
+          wallUs,
+          floorU: m.floorU ?? null,
+          roofU: m.roofU ?? null,
+          use: m.use, isHeated: m.isHeated,
+          bg: m.bg || pal.bg, line: m.line || pal.line, label: m.label || pal.label,
+        };
+      });
+    }
+    return result;
+  }, [wallsByStorey, openingsByStorey, areaMetaByStorey]);
+
+  // Lazily seed area metadata (name + palette) for newly-enclosed areas so
+  // they keep a stable identity/colour even as other areas are added/removed.
+  useEffect(() => {
+    setAreaMetaByStorey(prev => {
+      let changed = false;
+      const next = { ...prev };
+      for (let s = 0; s < STOREY_LABELS.length; s++) {
+        const faces = findClosedAreas(wallsByStorey[s] || []);
+        const meta = { ...(next[s] || {}) };
+        for (const face of faces) {
+          const key = areaKey(face.wallIds);
+          if (!meta[key]) {
+            const pal = PALETTE[Object.keys(meta).length % PALETTE.length];
+            meta[key] = { name: `Room ${Object.keys(meta).length+1}`, ...pal };
+            changed = true;
+          }
+        }
+        next[s] = meta;
+      }
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wallsByStorey]);
+
+  // roomsByStorey shape, derived — kept for geometryProcessor / other views
+  const roomsByStorey = useMemo(() => {
+    const r = {};
+    for (let s = 0; s < STOREY_LABELS.length; s++) r[s] = derivedAreasByStorey[s] || [];
+    return r;
+  }, [derivedAreasByStorey]);
+
+  // Storey validity — every storey's walls must form at least one closed loop
+  // (or have no walls at all).
+  const floorplanValid = useMemo(
+    () => Array.from({ length: STOREY_LABELS.length }).every((_, s) => hasClosedBoundary(wallsByStorey[s] || [])),
+    [wallsByStorey]
+  );
 
   // ── Centre view on existing geometry when opening an existing project ──
   // useLayoutEffect runs before the browser paints, so the recentred pan
   // is applied to the very first frame and avoids a visible flicker.
   useLayoutEffect(() => {
-    const allPts = Object.values(roomsByStorey).flat().flatMap(r => r.points);
+    const allPts = Object.values(wallsByStorey).flat().flatMap(w => [w.a, w.b]);
     if (allPts.length === 0) return;
     const xs = allPts.map(p => p.x), ys = allPts.map(p => p.y);
     const minX = Math.min(...xs), maxX = Math.max(...xs);
@@ -385,23 +530,37 @@ export default function FloorPlanUI({ projectId }) {
     });
   };
 
-  const rooms = roomsByStorey[activeStorey] || [];
-  const roomsRef = useRef(rooms);
-  useEffect(() => { roomsRef.current = rooms; }, [rooms]);
-  const setRooms = useCallback((updater) => {
-    setRoomsByStorey(prev => ({
+  const walls = wallsByStorey[activeStorey] || [];
+  const wallsRef = useRef(walls);
+  useEffect(() => { wallsRef.current = walls; }, [walls]);
+  const setWalls = useCallback((updater) => {
+    setWallsByStorey(prev => ({
       ...prev,
       [activeStorey]: typeof updater === "function" ? updater(prev[activeStorey] || []) : updater,
     }));
   }, [activeStorey]);
 
+  const openings = openingsByStorey[activeStorey] || [];
+  const setOpenings = useCallback((updater) => {
+    setOpeningsByStorey(prev => ({
+      ...prev,
+      [activeStorey]: typeof updater === "function" ? updater(prev[activeStorey] || []) : updater,
+    }));
+  }, [activeStorey]);
+
+  const areas = derivedAreasByStorey[activeStorey] || [];
+
   // ── Persist ──
   const [savedAt, setSavedAt] = useState(null);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_walls"), JSON.stringify(wallsByStorey)); } catch {} }, [wallsByStorey]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_openings"), JSON.stringify(openingsByStorey)); } catch {} }, [openingsByStorey]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_area_meta"), JSON.stringify(areaMetaByStorey)); } catch {} }, [areaMetaByStorey]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_rooms"), JSON.stringify(roomsByStorey)); setSavedAt(new Date()); } catch {} }, [roomsByStorey]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_ceilings"), JSON.stringify(ceilingHeights)); } catch {} }, [ceilingHeights]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_uvalues"),   JSON.stringify(globalU));           } catch {} }, [globalU]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_rotation"), JSON.stringify(buildingRotation));   } catch {} }, [buildingRotation]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_roofs"),    JSON.stringify(roofsByStorey));      } catch {} }, [roofsByStorey]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_valid"), floorplanValid ? "true" : "false"); } catch {} }, [floorplanValid]);
 
   // Persist BuildingModel so other views (3D, energy model) can consume it.
   useEffect(() => {
@@ -417,13 +576,18 @@ export default function FloorPlanUI({ projectId }) {
   const clearStorage = () => {
     if (!window.confirm("Clear all floors and start over?")) return;
     recorder.record("clear_all");
-    try { ["floorplan_rooms","floorplan_ceilings","floorplan_uvalues","floorplan_rotation","floorplan_roofs"].forEach(k => localStorage.removeItem(pk(k))); } catch {}
-    setRoomsByStorey({ 0:[], 1:[], 2:[] });
+    try {
+      ["floorplan_walls","floorplan_openings","floorplan_area_meta","floorplan_rooms","floorplan_ceilings","floorplan_uvalues","floorplan_rotation","floorplan_roofs","floorplan_valid"]
+        .forEach(k => localStorage.removeItem(pk(k)));
+    } catch {}
+    setWallsByStorey({ 0:[], 1:[], 2:[] });
+    setOpeningsByStorey({ 0:[], 1:[], 2:[] });
+    setAreaMetaByStorey({ 0:{}, 1:{}, 2:{} });
     setCeilingHeights({ 0:3.0, 1:2.7, 2:2.5 });
     setGlobalU({ ...DEFAULT_U_VALUES });
     setBuildingRotation(0);
     setRoofsByStorey({ 0:[], 1:[], 2:[] });
-    setSelectedId(null); setSelectedOpening(null); setDraft([]);
+    setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null); setDraft([]);
     setSelectedRoofId(null); setRoofDraft([]);
     undoStack.current = []; redoStack.current = []; pendingBase.current = null;
     if (historyTimer.current) { clearTimeout(historyTimer.current); historyTimer.current = null; }
@@ -432,13 +596,14 @@ export default function FloorPlanUI({ projectId }) {
   };
 
   // ── Undo / Redo ──
-  // Snapshot-based history over the floor plan's drawn geometry (rooms + roofs
-  // per storey). Rapid successive changes (e.g. dragging a vertex) are
-  // coalesced into a single undo step via a short debounce.
+  // Snapshot-based history over the floor plan's drawn geometry (walls,
+  // openings, area metadata and roofs per storey). Rapid successive changes
+  // (e.g. dragging a vertex) are coalesced into a single undo step via a
+  // short debounce.
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const skipHistory = useRef(false);
-  const historySnapshot = useRef({ roomsByStorey, roofsByStorey });
+  const historySnapshot = useRef({ wallsByStorey, openingsByStorey, areaMetaByStorey, roofsByStorey });
   const pendingBase = useRef(null);
   const historyTimer = useRef(null);
   const [undoAvailable, setUndoAvailable] = useState(false);
@@ -447,11 +612,11 @@ export default function FloorPlanUI({ projectId }) {
   useEffect(() => {
     if (skipHistory.current) {
       skipHistory.current = false;
-      historySnapshot.current = { roomsByStorey, roofsByStorey };
+      historySnapshot.current = { wallsByStorey, openingsByStorey, areaMetaByStorey, roofsByStorey };
       return;
     }
     if (pendingBase.current === null) pendingBase.current = historySnapshot.current;
-    historySnapshot.current = { roomsByStorey, roofsByStorey };
+    historySnapshot.current = { wallsByStorey, openingsByStorey, areaMetaByStorey, roofsByStorey };
     redoStack.current = [];
     setRedoAvailable(false);
     setUndoAvailable(true);
@@ -463,7 +628,7 @@ export default function FloorPlanUI({ projectId }) {
       historyTimer.current = null;
     }, 400);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roomsByStorey, roofsByStorey]);
+  }, [wallsByStorey, openingsByStorey, areaMetaByStorey, roofsByStorey]);
 
   useEffect(() => () => { if (historyTimer.current) clearTimeout(historyTimer.current); }, []);
 
@@ -480,44 +645,54 @@ export default function FloorPlanUI({ projectId }) {
     flushHistory();
     if (undoStack.current.length === 0) return;
     const prevState = undoStack.current.pop();
-    redoStack.current.push({ roomsByStorey, roofsByStorey });
+    redoStack.current.push({ wallsByStorey, openingsByStorey, areaMetaByStorey, roofsByStorey });
     skipHistory.current = true;
-    setRoomsByStorey(prevState.roomsByStorey);
+    setWallsByStorey(prevState.wallsByStorey);
+    setOpeningsByStorey(prevState.openingsByStorey);
+    setAreaMetaByStorey(prevState.areaMetaByStorey);
     setRoofsByStorey(prevState.roofsByStorey);
-    setSelectedId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null);
+    setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null);
     setUndoAvailable(undoStack.current.length > 0);
     setRedoAvailable(true);
     recorder.record("undo");
-  }, [roomsByStorey, roofsByStorey]);
+  }, [wallsByStorey, openingsByStorey, areaMetaByStorey, roofsByStorey]);
 
   const redo = useCallback(() => {
     if (redoStack.current.length === 0) return;
     const nextState = redoStack.current.pop();
     flushHistory();
-    undoStack.current.push({ roomsByStorey, roofsByStorey });
+    undoStack.current.push({ wallsByStorey, openingsByStorey, areaMetaByStorey, roofsByStorey });
     skipHistory.current = true;
-    setRoomsByStorey(nextState.roomsByStorey);
+    setWallsByStorey(nextState.wallsByStorey);
+    setOpeningsByStorey(nextState.openingsByStorey);
+    setAreaMetaByStorey(nextState.areaMetaByStorey);
     setRoofsByStorey(nextState.roofsByStorey);
-    setSelectedId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null);
+    setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null);
     setUndoAvailable(true);
     setRedoAvailable(redoStack.current.length > 0);
     recorder.record("redo");
-  }, [roomsByStorey, roofsByStorey]);
+  }, [wallsByStorey, openingsByStorey, areaMetaByStorey, roofsByStorey]);
 
   // ── Session recording ──
   // Keep refs so the state getter always reads the latest values without re-registering.
-  const _recRooms    = useRef(roomsByStorey);
+  const _recWalls    = useRef(wallsByStorey);
+  const _recOpenings = useRef(openingsByStorey);
+  const _recAreaMeta = useRef(areaMetaByStorey);
   const _recCeilings = useRef(ceilingHeights);
   const _recGlobalU  = useRef(globalU);
   const _recRotation = useRef(buildingRotation);
-  useEffect(() => { _recRooms.current    = roomsByStorey;    }, [roomsByStorey]);
+  useEffect(() => { _recWalls.current    = wallsByStorey;    }, [wallsByStorey]);
+  useEffect(() => { _recOpenings.current = openingsByStorey; }, [openingsByStorey]);
+  useEffect(() => { _recAreaMeta.current = areaMetaByStorey; }, [areaMetaByStorey]);
   useEffect(() => { _recCeilings.current = ceilingHeights;   }, [ceilingHeights]);
   useEffect(() => { _recGlobalU.current  = globalU;          }, [globalU]);
   useEffect(() => { _recRotation.current = buildingRotation; }, [buildingRotation]);
 
   useEffect(() => {
     recorder.setStateGetter(() => ({
-      roomsByStorey:    _recRooms.current,
+      wallsByStorey:    _recWalls.current,
+      openingsByStorey: _recOpenings.current,
+      areaMetaByStorey: _recAreaMeta.current,
       ceilingHeights:   _recCeilings.current,
       globalU:          _recGlobalU.current,
       buildingRotation: _recRotation.current,
@@ -529,7 +704,7 @@ export default function FloorPlanUI({ projectId }) {
   const [showReplay, setShowReplay] = useState(false);
 
   // ── Tool & drawing ──
-  const [tool,      setTool]      = useState("draw");
+  const [tool,      setTool]      = useState("wall");
   const [draft,     setDraft]     = useState([]);
   const [cursor,    setCursor]    = useState({ x:0, y:0 });
   const [snapOn,    setSnapOn]    = useState(true);
@@ -541,14 +716,15 @@ export default function FloorPlanUI({ projectId }) {
   const [selectedRoofEdge, setSelectedRoofEdge] = useState(null); // { roofId, edgeIdx }
 
   // ── Selection ──
-  const [selectedId,      setSelectedId]      = useState(null);
-  const [selectedOpening, setSelectedOpening] = useState(null);
+  const [selectedId,      setSelectedId]      = useState(null); // derived area id
+  const [selectedWallId,  setSelectedWallId]  = useState(null);
+  const [selectedOpening, setSelectedOpening] = useState(null); // { openingId }
   const [hoveredId,       setHoveredId]       = useState(null);
   const [wallHover,       setWallHover]       = useState(null);
 
   // ── Panel sections open/closed ──
-  const [secU,    setSecU]    = useState(true);  // U-values in room panel
-  const [secWall, setSecWall] = useState(false); // Wall list in room panel
+  const [secU,    setSecU]    = useState(true);  // U-values in panel
+  const [secWall, setSecWall] = useState(false); // Wall list in area panel
   const [secDef,  setSecDef]  = useState(false); // Global defaults always-on at panel bottom
 
   // ── Pointer ──
@@ -568,65 +744,70 @@ export default function FloorPlanUI({ projectId }) {
   const lw = 1.5 / (zoom * PPM);
   const closeThreshold = 20 / (zoom * PPM);
 
-  // ── Wall hover ──
-  const findWallHover = useCallback((cursor, rooms, openingWidth) => {
+  // Snap a candidate point onto an existing wall endpoint, if close enough —
+  // lets new wall chains connect to / close against existing geometry.
+  const snapToExisting = useCallback((pt) => {
+    let best = closeThreshold, found = null;
+    for (const w of wallsRef.current) {
+      for (const ep of [w.a, w.b]) {
+        const d = dist(pt, ep);
+        if (d < best) { best = d; found = ep; }
+      }
+    }
+    return found;
+  }, [closeThreshold]);
+
+  // ── Wall hover (for placing windows/doors) ──
+  const findWallHover = useCallback((cursor, walls, openingWidth) => {
     let best = WALL_HOVER_THRESHOLD, result = null;
-    for (const room of rooms) {
-      const pts = room.points;
-      for (let i = 0; i < pts.length; i++) {
-        const j = (i+1) % pts.length;
-        const d = distToSegment(cursor, pts[i], pts[j]);
-        if (d < best) {
-          best = d;
-          const { t, len } = projectOntoWall(cursor, pts[i], pts[j]);
-          const half = openingWidth / 2;
-          if (len < openingWidth + 0.1) continue;
-          result = { roomId: room.id, wallIdx: i, offset: Math.max(half, Math.min(len-half, t*len))-half, wallLen: len };
-        }
+    for (const w of walls) {
+      const d = distToSegment(cursor, w.a, w.b);
+      if (d < best) {
+        const { t, len } = projectOntoWall(cursor, w.a, w.b);
+        const half = openingWidth / 2;
+        if (len < openingWidth + 0.1) continue;
+        best = d;
+        result = { wallId: w.id, offset: Math.max(half, Math.min(len-half, t*len))-half, wallLen: len };
       }
     }
     return result;
   }, []);
 
-  // ── U-value helpers ──
+  // ── U-value / metadata helpers ──
   const effU = (override, defaultVal) => (override !== null && override !== undefined) ? override : defaultVal;
-  const updateRoomU = useCallback((roomId, key, value) => {
-    recorder.record("uvalue_room", { roomId, key, value });
-    setRooms(rs => rs.map(r => r.id === roomId ? { ...r, [key]: value } : r));
-  }, [setRooms]);
-  const updateWallU = useCallback((roomId, wallIdx, value) => {
-    recorder.record("uvalue_wall", { roomId, wallIdx, value });
-    setRooms(rs => rs.map(r => {
-      if (r.id !== roomId) return r;
-      const wallUs = { ...r.wallUs };
-      if (value === null) delete wallUs[wallIdx]; else wallUs[wallIdx] = value;
-      return { ...r, wallUs };
-    }));
-  }, [setRooms]);
-  const updateOpeningU = useCallback((roomId, openingId, value) => {
-    recorder.record("uvalue_opening", { roomId, openingId, value });
-    setRooms(rs => rs.map(r => {
-      if (r.id !== roomId) return r;
-      return { ...r, openings: r.openings.map(o => o.id === openingId ? { ...o, uValue: value } : o) };
-    }));
-  }, [setRooms]);
-  const updateOpeningSHGC = useCallback((roomId, openingId, value) => {
-    recorder.record("shgc_opening", { roomId, openingId, value });
-    setRooms(rs => rs.map(r => {
-      if (r.id !== roomId) return r;
-      return { ...r, openings: r.openings.map(o =>
-        o.id === openingId ? { ...o, glazing: { ...(o.glazing ?? {}), solarHeatGainCoeff: value } } : o
-      )};
-    }));
-  }, [setRooms]);
+  const updateAreaMeta = useCallback((areaId, key, value) => {
+    recorder.record("uvalue_room", { areaId, key, value });
+    setAreaMetaByStorey(prev => {
+      const meta = { ...(prev[activeStorey] || {}) };
+      meta[areaId] = { ...(meta[areaId] || {}), [key]: value };
+      return { ...prev, [activeStorey]: meta };
+    });
+  }, [activeStorey]);
+  const renameArea = useCallback((areaId, name) => {
+    recorder.record("room_rename", { areaId, name });
+    setAreaMetaByStorey(prev => {
+      const meta = { ...(prev[activeStorey] || {}) };
+      meta[areaId] = { ...(meta[areaId] || {}), name };
+      return { ...prev, [activeStorey]: meta };
+    });
+  }, [activeStorey]);
+  const updateWallU = useCallback((wallId, value) => {
+    recorder.record("uvalue_wall", { wallId, value });
+    setWalls(ws => ws.map(w => w.id === wallId ? { ...w, uValue: value } : w));
+  }, [setWalls]);
+  const updateOpeningU = useCallback((openingId, value) => {
+    recorder.record("uvalue_opening", { openingId, value });
+    setOpenings(os => os.map(o => o.id === openingId ? { ...o, uValue: value } : o));
+  }, [setOpenings]);
+  const updateOpeningSHGC = useCallback((openingId, value) => {
+    recorder.record("shgc_opening", { openingId, value });
+    setOpenings(os => os.map(o => o.id === openingId
+      ? { ...o, glazing: { ...(o.glazing ?? {}), solarHeatGainCoeff: value } } : o));
+  }, [setOpenings]);
 
-  // ── New room/opening factories ──
-  const newRoom = useCallback((draft, rooms, pal) => ({
-    id: uid(), name: `Room ${rooms.length+1}`, points: [...draft],
-    openings: [], wallUs: {}, floorU: null, roofU: null, ...pal,
-  }), []);
+  // ── New opening factory ──
   const newOpening = useCallback((tool, wh) => ({
-    id: uid(), type: tool, wallIdx: wh.wallIdx, offset: wh.offset,
+    id: uid(), wallId: wh.wallId, type: tool, offset: wh.offset,
     width: OPENING_DEFAULTS[tool].width, height: OPENING_DEFAULTS[tool].height,
     sillHeight: OPENING_DEFAULTS[tool].sillHeight, uValue: null,
   }), []);
@@ -635,16 +816,22 @@ export default function FloorPlanUI({ projectId }) {
   const onMouseMove = useCallback((e) => {
     const p = panState.current;
     if (p.active) { const np = { x: p.startPan.x+e.clientX-p.origin.x, y: p.startPan.y+e.clientY-p.origin.y }; setPan(np); panRef.current = np; return; }
-    const raw = svgPt(e), pt = snapPt(raw);
+    const raw = svgPt(e), pt = snapToExisting(raw) || snapPt(raw);
     setCursor(pt);
     if (dragVertex.current) {
-      const { roomId, vIdx } = dragVertex.current;
-      setRooms(rs => rs.map(r => { if (r.id !== roomId) return r; const pts=[...r.points]; pts[vIdx]=pt; return {...r,points:pts}; }));
+      const origin = dragVertex.current.point;
+      setWalls(ws => ws.map(w => {
+        let a = w.a, b = w.b;
+        if (dist(w.a, origin) < VERTEX_TOL) a = pt;
+        if (dist(w.b, origin) < VERTEX_TOL) b = pt;
+        return (a !== w.a || b !== w.b) ? { ...w, a, b } : w;
+      }));
+      dragVertex.current.point = pt;
       return;
     }
-    if (tool === "window" || tool === "door") setWallHover(findWallHover(raw, roomsRef.current, OPENING_DEFAULTS[tool].width));
+    if (tool === "window" || tool === "door") setWallHover(findWallHover(raw, wallsRef.current, OPENING_DEFAULTS[tool].width));
     else setWallHover(null);
-  }, [svgPt, snapPt, tool, findWallHover, setRooms]);
+  }, [svgPt, snapPt, snapToExisting, tool, findWallHover, setWalls]);
 
   const onMouseDown = useCallback((e) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
@@ -655,48 +842,41 @@ export default function FloorPlanUI({ projectId }) {
   const onMouseUp = useCallback(() => {
     panState.current.active = false;
     if (dragVertex.current) {
-      recorder.record("vertex_drag_end", { roomId: dragVertex.current.roomId, vIdx: dragVertex.current.vIdx });
+      recorder.record("vertex_drag_end", { point: dragVertex.current.point });
       dragVertex.current = null;
     }
   }, []);
 
   const onCanvasClick = useCallback((e) => {
     if (panState.current.active) return;
-    const pt = snapPt(svgPt(e)), rawPt = svgPt(e);
+    const rawPt = svgPt(e);
+    const pt = snapToExisting(rawPt) || snapPt(rawPt);
 
     if (tool === "window" || tool === "door") {
-      const wh = findWallHover(rawPt, rooms, OPENING_DEFAULTS[tool].width);
+      const wh = findWallHover(rawPt, walls, OPENING_DEFAULTS[tool].width);
       if (wh) {
-        setRooms(rs => rs.map(r => r.id === wh.roomId ? { ...r, openings: [...r.openings, newOpening(tool, wh)] } : r));
-        recorder.record("opening_add", { type: tool, roomId: wh.roomId, wallIdx: wh.wallIdx, offset: wh.offset });
+        setOpenings(os => [...os, newOpening(tool, wh)]);
+        recorder.record("opening_add", { type: tool, wallId: wh.wallId, offset: wh.offset });
       }
       return;
     }
+
     if (tool === "select") {
-      for (const room of rooms) {
-        for (const o of room.openings) {
-          const ptA = room.points[o.wallIdx], ptB = room.points[(o.wallIdx+1)%room.points.length];
-          const wLen = dist(ptA, ptB), dir = { x:(ptB.x-ptA.x)/wLen, y:(ptB.y-ptA.y)/wLen };
-          const mid = { x:ptA.x+dir.x*(o.offset+o.width/2), y:ptA.y+dir.y*(o.offset+o.width/2) };
-          if (dist(rawPt, mid) < Math.max(0.25, o.width/2)) {
-            setSelectedOpening({ roomId:room.id, openingId:o.id }); setSelectedId(null);
-            recorder.record("select_opening", { roomId: room.id, openingId: o.id });
-            return;
-          }
+      // Openings first
+      for (const o of openings) {
+        const w = walls.find(ww => ww.id === o.wallId);
+        if (!w) continue;
+        const wLen = dist(w.a, w.b);
+        const dir = { x:(w.b.x-w.a.x)/wLen, y:(w.b.y-w.a.y)/wLen };
+        const mid = { x:w.a.x+dir.x*(o.offset+o.width/2), y:w.a.y+dir.y*(o.offset+o.width/2) };
+        if (dist(rawPt, mid) < Math.max(0.25, o.width/2)) {
+          setSelectedOpening({ openingId: o.id }); setSelectedId(null); setSelectedWallId(null);
+          setSelectedRoofId(null); setSelectedRoofEdge(null);
+          recorder.record("select_opening", { openingId: o.id });
+          return;
         }
       }
-      const hit = [...rooms].reverse().find(r => pointInPoly(rawPt, r.points));
-      if (hit) {
-        setSelectedId(hit.id); setSelectedOpening(null);
-        recorder.record("select_room", { roomId: hit.id });
-      } else {
-        setSelectedId(null); setSelectedOpening(null);
-        recorder.record("select_clear");
-      }
-      return;
-    }
-    if (tool === "roof") {
-      // Check if clicking on an edge of selected roof (edge type toggle)
+      // Roof edge (when a roof is already selected)
       if (selectedRoofId) {
         const selRoof = roofs.find(r => r.id === selectedRoofId);
         if (selRoof) {
@@ -710,13 +890,57 @@ export default function FloorPlanUI({ projectId }) {
           }
         }
       }
-      // Drawing new roof polygon
-      if (roofDraft.length >= 3 && dist(pt, roofDraft[0]) < closeThreshold) {
+      // Roof body
+      const hitRoof = [...roofs].reverse().find(r => pointInPoly(rawPt, r.points));
+      if (hitRoof) {
+        setSelectedRoofId(hitRoof.id); setSelectedRoofEdge(null);
+        setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null);
+        return;
+      }
+      // Walls
+      let bestWall = null, bestD = WALL_HOVER_THRESHOLD;
+      for (const w of walls) {
+        const d = distToSegment(rawPt, w.a, w.b);
+        if (d < bestD) { bestD = d; bestWall = w; }
+      }
+      if (bestWall) {
+        setSelectedWallId(bestWall.id); setSelectedId(null); setSelectedOpening(null);
+        setSelectedRoofId(null); setSelectedRoofEdge(null);
+        recorder.record("select_wall", { wallId: bestWall.id });
+        return;
+      }
+      // Areas
+      const hit = [...areas].reverse().find(a => pointInPoly(rawPt, a.points));
+      if (hit) {
+        setSelectedId(hit.id); setSelectedWallId(null); setSelectedOpening(null);
+        setSelectedRoofId(null); setSelectedRoofEdge(null);
+        recorder.record("select_room", { areaId: hit.id });
+      } else {
+        setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null);
+        setSelectedRoofId(null); setSelectedRoofEdge(null);
+        recorder.record("select_clear");
+      }
+      return;
+    }
+
+    if (tool === "roof") {
+      if (selectedRoofId) {
+        const selRoof = roofs.find(r => r.id === selectedRoofId);
+        if (selRoof) {
+          const { points: rp } = selRoof;
+          for (let i = 0; i < rp.length; i++) {
+            const j = (i + 1) % rp.length;
+            if (distToSegment(rawPt, rp[i], rp[j]) < WALL_HOVER_THRESHOLD) {
+              setSelectedRoofEdge({ roofId: selectedRoofId, edgeIdx: i });
+              return;
+            }
+          }
+        }
+      }
+      const snappedPt = snapPt(rawPt);
+      if (roofDraft.length >= 3 && dist(snappedPt, roofDraft[0]) < closeThreshold) {
         const newRoof = {
-          id: uid(),
-          points: [...roofDraft],
-          pitch: ROOF_DEFAULT_PITCH,
-          overhang: 0,
+          id: uid(), points: [...roofDraft], pitch: ROOF_DEFAULT_PITCH, overhang: 0,
           edgeTypes: roofDraft.map(() => 'bottom'),
         };
         setRoofs(rs => [...rs, newRoof]);
@@ -725,56 +949,35 @@ export default function FloorPlanUI({ projectId }) {
         recorder.record("roof_close", { points: [...roofDraft] });
         setRoofDraft([]);
       } else {
-        recorder.record("roof_point", { pt });
-        setRoofDraft(d => [...d, pt]);
+        recorder.record("roof_point", { pt: snappedPt });
+        setRoofDraft(d => [...d, snappedPt]);
       }
       return;
     }
-    if (tool === "select") {
-      // Check roof edge click first (when a roof is selected)
-      if (selectedRoofId) {
-        const selRoof = roofs.find(r => r.id === selectedRoofId);
-        if (selRoof) {
-          const { points: rp } = selRoof;
-          for (let i = 0; i < rp.length; i++) {
-            const j = (i + 1) % rp.length;
-            if (distToSegment(rawPt, rp[i], rp[j]) < WALL_HOVER_THRESHOLD) {
-              setSelectedRoofEdge({ roofId: selectedRoofId, edgeIdx: i });
-              return;
-            }
-          }
-        }
-      }
-      // Check roof click
-      const hitRoof = [...roofs].reverse().find(r => pointInPoly(rawPt, r.points));
-      if (hitRoof) {
-        setSelectedRoofId(hitRoof.id); setSelectedRoofEdge(null);
-        setSelectedId(null); setSelectedOpening(null);
-        return;
-      }
-    }
-    if (tool !== "draw") return;
-    if (draft.length >= 3 && dist(pt, draft[0]) < closeThreshold) {
-      const pal = PALETTE[rooms.length % PALETTE.length];
-      setRooms(rs => [...rs, newRoom(draft, rooms, pal)]);
-      recorder.record("room_close", { points: [...draft] });
-      setDraft([]);
-    } else {
-      recorder.record("draw_point", { pt });
-      setDraft(d => [...d, pt]);
-    }
-  }, [tool, snapPt, svgPt, draft, closeThreshold, rooms, setRooms, findWallHover, roofDraft, roofs, setRoofs, selectedRoofId]);
 
-  const onVertexMouseDown = useCallback((e, roomId, vIdx) => {
+    if (tool !== "wall") return;
+    // Wall drawing: each click commits a new wall segment immediately —
+    // there is no "Enter to close"; loops close themselves once the wall
+    // graph encloses an area.
+    if (draft.length === 0) {
+      setDraft([pt]);
+      recorder.record("wall_start", { pt });
+      return;
+    }
+    const last = draft[draft.length-1];
+    if (dist(pt, last) < 0.02) return;
+    const newWall = { id: uid(), a: last, b: pt, uValue: null };
+    setWalls(ws => [...ws, newWall]);
+    recorder.record("wall_add", { a: last, b: pt });
+    setDraft(d => [...d, pt]);
+  }, [tool, snapPt, snapToExisting, svgPt, draft, closeThreshold, walls, openings, areas, setWalls, setOpenings, findWallHover, newOpening, roofDraft, roofs, setRoofs, selectedRoofId]);
+
+  const onVertexMouseDown = useCallback((e, point) => {
     if (tool !== "select") return;
-    e.stopPropagation(); dragVertex.current = { roomId, vIdx };
-    setSelectedId(roomId); setSelectedOpening(null);
+    e.stopPropagation();
+    dragVertex.current = { point };
   }, [tool]);
 
-  const onRoomClick = useCallback((e, roomId) => {
-    if (tool !== "select") return;
-    e.stopPropagation(); setSelectedId(roomId); setSelectedOpening(null);
-  }, [tool]);
 
   // ── Keyboard ──
   useEffect(() => {
@@ -782,34 +985,23 @@ export default function FloorPlanUI({ projectId }) {
       if (e.target.tagName === "INPUT") return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
       if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "y" || (e.key.toLowerCase() === "z" && e.shiftKey))) { e.preventDefault(); redo(); return; }
-      if (e.key === "Escape") { setDraft([]); setRoofDraft([]); setSelectedId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null); recorder.record("key_escape"); }
-      if (e.key === "d") { setTool("draw"); recorder.record("tool_change", { tool: "draw" }); }
+      if (e.key === "Escape") { setDraft([]); setRoofDraft([]); setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null); setSelectedRoofId(null); setSelectedRoofEdge(null); recorder.record("key_escape"); }
+      if (e.key === "d") { setTool("wall"); setRoofDraft([]); recorder.record("tool_change", { tool: "wall" }); }
       if (e.key === "s") { setTool("select"); setDraft([]); setRoofDraft([]); recorder.record("tool_change", { tool: "select" }); }
-      if (e.key === "w") { setTool("window"); recorder.record("tool_change", { tool: "window" }); }
-      if (e.key === "r") { setTool("door"); recorder.record("tool_change", { tool: "door" }); }
+      if (e.key === "w") { setTool("window"); setDraft([]); recorder.record("tool_change", { tool: "window" }); }
+      if (e.key === "r") { setTool("door"); setDraft([]); recorder.record("tool_change", { tool: "door" }); }
       if (e.key === "f") { setTool("roof"); setDraft([]); recorder.record("tool_change", { tool: "roof" }); }
-      if (e.key === "Enter" && tool === "draw" && draft.length >= 3) {
-        const pal = PALETTE[rooms.length % PALETTE.length];
-        setRooms(rs => [...rs, newRoom(draft, rooms, pal)]);
-        recorder.record("room_close", { points: [...draft], via: "enter" });
-        setDraft([]);
-      }
-      if (e.key === "Enter" && tool === "roof" && roofDraft.length >= 3) {
-        const newRoof = { id: uid(), points: [...roofDraft], pitch: ROOF_DEFAULT_PITCH, overhang: 0, edgeTypes: roofDraft.map(() => 'bottom') };
-        setRoofs(rs => [...rs, newRoof]);
-        setSelectedRoofId(newRoof.id);
-        recorder.record("roof_close", { points: [...roofDraft], via: "enter" });
-        setRoofDraft([]);
-      }
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedOpening) {
-          const { roomId, openingId } = selectedOpening;
-          setRooms(rs => rs.map(r => r.id === roomId ? { ...r, openings: r.openings.filter(o => o.id !== openingId) } : r));
-          recorder.record("opening_delete", { roomId, openingId });
+          const { openingId } = selectedOpening;
+          setOpenings(os => os.filter(o => o.id !== openingId));
+          recorder.record("opening_delete", { openingId });
           setSelectedOpening(null);
-        } else if (selectedId) {
-          recorder.record("room_delete", { roomId: selectedId });
-          setRooms(rs => rs.filter(r => r.id !== selectedId)); setSelectedId(null);
+        } else if (selectedWallId) {
+          recorder.record("wall_delete", { wallId: selectedWallId });
+          setWalls(ws => ws.filter(w => w.id !== selectedWallId));
+          setOpenings(os => os.filter(o => o.wallId !== selectedWallId));
+          setSelectedWallId(null);
         } else if (selectedRoofId) {
           recorder.record("roof_delete", { roofId: selectedRoofId });
           setRoofs(rs => rs.filter(r => r.id !== selectedRoofId));
@@ -819,7 +1011,7 @@ export default function FloorPlanUI({ projectId }) {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [draft, roofDraft, tool, rooms, roofs, selectedId, selectedOpening, selectedRoofId, setRooms, setRoofs, undo, redo]);
+  }, [selectedWallId, selectedOpening, selectedRoofId, setWalls, setOpenings, setRoofs, undo, redo]);
 
   // ── Scroll zoom ──
   useEffect(() => {
@@ -855,39 +1047,36 @@ export default function FloorPlanUI({ projectId }) {
   };
 
   // ── Derived ──
-  const selectedRoom   = rooms.find(r => r.id === selectedId);
-  const selOR          = selectedOpening ? rooms.find(r => r.id === selectedOpening.roomId) : null;
-  const selOO          = selOR?.openings?.find(o => o.id === selectedOpening?.openingId);
-  const totalArea      = rooms.reduce((s,r) => s+area(r.points), 0);
-  const perimeter      = (pts) => pts.reduce((s,p,i) => s+dist(p,pts[(i+1)%pts.length]), 0);
+  const selectedArea = areas.find(a => a.id === selectedId);
+  const selectedWall = walls.find(w => w.id === selectedWallId);
+  const selOO    = openings.find(o => o.id === selectedOpening?.openingId);
+  const selOWall = selOO ? walls.find(w => w.id === selOO.wallId) : null;
+  const totalArea = areas.reduce((s,a) => s+area(a.points), 0);
+  const perimeter = (pts) => pts.reduce((s,p,i) => s+dist(p,pts[(i+1)%pts.length]), 0);
 
   const updateOpeningProp = (prop, delta, min, max) => {
     if (!selectedOpening) return;
-    const { roomId, openingId } = selectedOpening;
-    setRooms(rs => rs.map(r => {
-      if (r.id !== roomId) return r;
-      return { ...r, openings: r.openings.map(o => {
-        if (o.id !== openingId) return o;
-        return { ...o, [prop]: Math.round(Math.max(min, Math.min(max, (o[prop]??0)+delta))*10)/10 };
-      })};
+    const { openingId } = selectedOpening;
+    setOpenings(os => os.map(o => {
+      if (o.id !== openingId) return o;
+      return { ...o, [prop]: Math.round(Math.max(min, Math.min(max, (o[prop]??0)+delta))*10)/10 };
     }));
   };
   const deleteSelectedOpening = () => {
     if (!selectedOpening) return;
-    const { roomId, openingId } = selectedOpening;
-    setRooms(rs => rs.map(r => r.id === roomId ? { ...r, openings: r.openings.filter(o => o.id !== openingId) } : r));
+    setOpenings(os => os.filter(o => o.id !== selectedOpening.openingId));
     setSelectedOpening(null);
   };
 
   const tools = [
-    { id:"draw",   label:"DRAW",   key:"D" },
+    { id:"wall",   label:"WALL",   key:"D" },
     { id:"select", label:"SELECT", key:"S" },
     { id:"window", label:"WINDOW", key:"W" },
     { id:"door",   label:"DOOR",   key:"R" },
     { id:"roof",   label:"ROOF",   key:"F" },
   ];
   const toolColors = {
-    draw:   { active:"#1e4a7a", border:"#2563eb", text:"#7dd3fc" },
+    wall:   { active:"#1e4a7a", border:"#2563eb", text:"#7dd3fc" },
     select: { active:"#1e4a7a", border:"#2563eb", text:"#7dd3fc" },
     window: { active:"#0c3050", border:"#38bdf8", text:"#7dd3fc" },
     door:   { active:"#1e1040", border:"#a78bfa", text:"#c4b5fd" },
@@ -898,7 +1087,7 @@ export default function FloorPlanUI({ projectId }) {
   const renderPanelContent = () => {
 
     // ── Opening selected ──
-    if (selOO && selOR) {
+    if (selOO) {
       const isWindow = selOO.type === "window";
       const accent   = isWindow ? "#38bdf8" : "#a78bfa";
       const sill     = selOO.sillHeight ?? (isWindow ? 0.9 : 0.0);
@@ -927,7 +1116,7 @@ export default function FloorPlanUI({ projectId }) {
           <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
             <div style={{ width:8,height:8,borderRadius:"50%",background:accent }}/>
             <span style={{ color:accent, fontWeight:700, fontSize:12, letterSpacing:"0.1em" }}>{isWindow?"WINDOW":"DOOR"}</span>
-            <span style={{ color:"#1e3a6b", fontSize:9 }}>{selOR.name} · Wall {selOO.wallIdx+1}</span>
+            {selOWall && <span style={{ color:"#1e3a6b", fontSize:9 }}>{dist(selOWall.a,selOWall.b).toFixed(1)}m wall</span>}
           </div>
 
           {/* Elevation diagram */}
@@ -966,7 +1155,7 @@ export default function FloorPlanUI({ projectId }) {
             <URow label={isWindow?"Glazing":"Door"}
               value={selOO.uValue}
               defaultVal={globalU[defKey]}
-              onChange={v => updateOpeningU(selOR.id, selOO.id, v)}
+              onChange={v => updateOpeningU(selOO.id, v)}
               accent={accent}/>
             <div style={{ color:"#1a3050", fontSize:8, marginTop:6 }}>
               Effective: <span style={{ color:"#7dd3fc" }}>{effU(selOO.uValue, globalU[defKey]).toFixed(2)}</span> W/m²K
@@ -986,7 +1175,7 @@ export default function FloorPlanUI({ projectId }) {
                 <URow label="SHGC (g-value)"
                   value={isDefault ? null : shgc}
                   defaultVal={0.63}
-                  onChange={v => updateOpeningSHGC(selOR.id, selOO.id, v === null ? null : Math.min(0.99, Math.max(0.01, v)))}
+                  onChange={v => updateOpeningSHGC(selOO.id, v === null ? null : Math.min(0.99, Math.max(0.01, v)))}
                   accent="#f59e0b"/>
                 <div style={{ color:"#1a3050", fontSize:8, marginTop:4, lineHeight:1.6 }}>
                   Fraction of incident solar transmitted. 0.63 = double glazing · 0.27 = low-e triple.
@@ -1105,47 +1294,90 @@ export default function FloorPlanUI({ projectId }) {
       );
     }
 
-    // ── Room selected ──
-    if (selectedRoom) {
-      const openings = selectedRoom.openings || [];
-      const wins = openings.filter(o=>o.type==="window").length;
-      const drs  = openings.filter(o=>o.type==="door").length;
+    // ── Wall selected ──
+    if (selectedWall) {
+      const len = dist(selectedWall.a, selectedWall.b);
+      const ang = Math.atan2(selectedWall.b.y-selectedWall.a.y, selectedWall.b.x-selectedWall.a.x)*180/Math.PI;
+      const dirs = ["E","SE","S","SW","W","NW","N","NE"];
+      const dirL = dirs[Math.round(((ang%360)+360)%360/45)%8];
+      const wallOpenings = openings.filter(o=>o.wallId===selectedWall.id);
+      return (
+        <div>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+            <div style={{ width:8,height:8,borderRadius:"50%",background:"#60a5fa" }}/>
+            <span style={{ color:"#60a5fa", fontWeight:700, fontSize:12, letterSpacing:"0.1em" }}>WALL</span>
+            <span style={{ color:"#1e3a6b", fontSize:9 }}>{dirL}</span>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom:4 }}>
+            <Stat label="LENGTH"   value={`${len.toFixed(2)} m`}/>
+            <Stat label="OPENINGS" value={`${wallOpenings.length}`}/>
+          </div>
+
+          <Section label="U-VALUE" open={secU} onToggle={()=>setSecU(v=>!v)} accent="#60a5fa">
+            <URow label="Wall" value={selectedWall.uValue} defaultVal={globalU.wall}
+              onChange={v=>updateWallU(selectedWall.id, v)}/>
+            <div style={{ color:"#1a3050",fontSize:8,marginTop:8,lineHeight:1.6 }}>
+              Shared by any room(s) bordering this wall.<br/>
+              Effective: <span style={{color:"#7dd3fc"}}>{effU(selectedWall.uValue,globalU.wall).toFixed(2)}</span> W/m²K
+            </div>
+          </Section>
+
+          <button onClick={()=>{
+              recorder.record("wall_delete", { wallId: selectedWall.id });
+              setWalls(ws=>ws.filter(w=>w.id!==selectedWall.id));
+              setOpenings(os=>os.filter(o=>o.wallId!==selectedWall.id));
+              setSelectedWallId(null);
+            }}
+            style={{ width:"100%",padding:"6px",background:"#200a0a",border:"1px solid #7f1d1d",color:"#f87171",borderRadius:3,cursor:"pointer",fontSize:11,fontFamily:"monospace",marginTop:14 }}>
+            DELETE WALL
+          </button>
+        </div>
+      );
+    }
+
+    // ── Area (room) selected ──
+    if (selectedArea) {
+      const areaOpenings = selectedArea.openings || [];
+      const wins = areaOpenings.filter(o=>o.type==="window").length;
+      const drs  = areaOpenings.filter(o=>o.type==="door").length;
 
       return (
         <div>
           <div style={{ marginBottom:12 }}>
             <div style={{ color:"#2d5a8a",fontSize:9,marginBottom:4,letterSpacing:"0.1em" }}>ROOM NAME</div>
-            <input value={selectedRoom.name}
-              onChange={e => { setRooms(rs=>rs.map(r=>r.id===selectedId?{...r,name:e.target.value}:r)); recorder.record("room_rename", { roomId: selectedId, name: e.target.value }); }}
+            <input value={selectedArea.name}
+              onChange={e => renameArea(selectedArea.id, e.target.value)}
               style={{ background:"#0a1628",border:"1px solid #1e3a6b",color:"#c8d8f0",padding:"5px 8px",borderRadius:3,width:"100%",fontFamily:"monospace",fontSize:11,outline:"none",boxSizing:"border-box" }}/>
           </div>
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom:4 }}>
-            <Stat label="AREA"      value={`${area(selectedRoom.points).toFixed(2)} m²`}/>
-            <Stat label="VOLUME"    value={`${(area(selectedRoom.points)*ceilingH).toFixed(1)} m³`}/>
+            <Stat label="AREA"      value={`${area(selectedArea.points).toFixed(2)} m²`}/>
+            <Stat label="VOLUME"    value={`${(area(selectedArea.points)*ceilingH).toFixed(1)} m³`}/>
             <Stat label="CEILING"   value={`${ceilingH.toFixed(1)} m`}/>
-            <Stat label="PERIMETER" value={`${perimeter(selectedRoom.points).toFixed(2)} m`}/>
+            <Stat label="PERIMETER" value={`${perimeter(selectedArea.points).toFixed(2)} m`}/>
           </div>
 
           {/* ── U-values ── */}
           <Section label="U-VALUES" open={secU} onToggle={()=>setSecU(v=>!v)} accent="#38bdf8">
-            <URow label="Floor" value={selectedRoom.floorU} defaultVal={globalU.floor} onChange={v=>updateRoomU(selectedRoom.id,"floorU",v)}/>
-            <URow label="Roof / ceiling" value={selectedRoom.roofU} defaultVal={globalU.roof} onChange={v=>updateRoomU(selectedRoom.id,"roofU",v)}/>
+            <URow label="Floor" value={selectedArea.floorU} defaultVal={globalU.floor} onChange={v=>updateAreaMeta(selectedArea.id,"floorU",v)}/>
+            <URow label="Roof / ceiling" value={selectedArea.roofU} defaultVal={globalU.roof} onChange={v=>updateAreaMeta(selectedArea.id,"roofU",v)}/>
             <div style={{ color:"#1a3050",fontSize:8,marginTop:8,lineHeight:1.6 }}>
-              Floor effective: <span style={{color:"#7dd3fc"}}>{effU(selectedRoom.floorU,globalU.floor).toFixed(2)}</span> W/m²K<br/>
-              Roof effective:  <span style={{color:"#7dd3fc"}}>{effU(selectedRoom.roofU, globalU.roof ).toFixed(2)}</span> W/m²K
+              Floor effective: <span style={{color:"#7dd3fc"}}>{effU(selectedArea.floorU,globalU.floor).toFixed(2)}</span> W/m²K<br/>
+              Roof effective:  <span style={{color:"#7dd3fc"}}>{effU(selectedArea.roofU, globalU.roof ).toFixed(2)}</span> W/m²K
             </div>
           </Section>
 
           {/* ── Walls ── */}
           <Section label="WALLS" open={secWall} onToggle={()=>setSecWall(v=>!v)}>
-            {selectedRoom.points.map((p, i) => {
-              const next = selectedRoom.points[(i+1)%selectedRoom.points.length];
+            {selectedArea.points.map((p, i) => {
+              const next = selectedArea.points[(i+1)%selectedArea.points.length];
               const len  = dist(p, next);
               const ang  = Math.atan2(next.y-p.y, next.x-p.x)*180/Math.PI;
               const dirs = ["E","SE","S","SW","W","NW","N","NE"];
               const dirL = dirs[Math.round(((ang%360)+360)%360/45)%8];
-              const wo   = openings.filter(o=>o.wallIdx===i);
-              const wallUval = selectedRoom.wallUs?.[i] ?? null;
+              const wo   = areaOpenings.filter(o=>o.wallIdx===i);
+              const wallId = selectedArea.wallIds[i];
+              const wallObj = walls.find(w=>w.id===wallId);
+              const wallUval = wallObj?.uValue ?? null;
               return (
                 <div key={i} style={{ paddingBottom:8, marginBottom:8, borderBottom:"1px solid #0a1628" }}>
                   <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4 }}>
@@ -1156,14 +1388,14 @@ export default function FloorPlanUI({ projectId }) {
                     <span style={{ color:"#7dd3fc",fontSize:9 }}>{len.toFixed(2)}m</span>
                   </div>
                   <URow label="U-value" value={wallUval} defaultVal={globalU.wall}
-                    onChange={v=>updateWallU(selectedRoom.id,i,v)}/>
+                    onChange={v=>updateWallU(wallId,v)}/>
                 </div>
               );
             })}
           </Section>
 
           {/* ── Openings summary ── */}
-          {openings.length > 0 && (
+          {areaOpenings.length > 0 && (
             <Section label="OPENINGS" open={true} onToggle={()=>{}}>
               <div style={{ display:"flex",gap:6,marginBottom:8 }}>
                 <div style={{ flex:1,background:"#0a1628",border:"1px solid #132040",borderRadius:4,padding:"6px",textAlign:"center" }}>
@@ -1175,11 +1407,11 @@ export default function FloorPlanUI({ projectId }) {
                   <div style={{ color:"#2d5a8a",fontSize:8 }}>DOORS</div>
                 </div>
               </div>
-              {openings.map(o => {
+              {areaOpenings.map(o => {
                 const c = o.type==="window"?"#38bdf8":"#a78bfa";
                 const defK = o.type==="window"?"window":"door";
                 return (
-                  <div key={o.id} onClick={()=>{ setSelectedOpening({roomId:selectedId,openingId:o.id}); setSelectedId(null); }}
+                  <div key={o.id} onClick={()=>{ setSelectedOpening({openingId:o.id}); setSelectedId(null); setSelectedWallId(null); }}
                     style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"5px 8px",marginBottom:3,background:"#0a1628",border:"1px solid #132040",borderRadius:3,cursor:"pointer" }}>
                     <div style={{ display:"flex",alignItems:"center",gap:6 }}>
                       <div style={{ width:6,height:6,borderRadius:"50%",background:c }}/>
@@ -1195,49 +1427,50 @@ export default function FloorPlanUI({ projectId }) {
               })}
             </Section>
           )}
-
-          <button onClick={()=>{ recorder.record("room_delete", { roomId: selectedId }); setRooms(rs=>rs.filter(r=>r.id!==selectedId)); setSelectedId(null); }}
-            style={{ width:"100%",padding:"6px",background:"#200a0a",border:"1px solid #7f1d1d",color:"#f87171",borderRadius:3,cursor:"pointer",fontSize:11,fontFamily:"monospace",marginTop:14 }}>
-            DELETE ROOM
-          </button>
         </div>
       );
     }
 
     // ── Nothing selected ──
-    const hints = { draw:"Click to place vertices.\nClick near start to close.\nPress Enter to close.", select:"Click a room or opening\nto select and edit it.\nDrag vertices to reshape.", window:"Click on any wall\nto place a window.", door:"Click on any wall\nto place a door.", roof:"Click to place roof vertices.\nClick near start (or Enter) to close.\nThen select edges to set type." };
+    const hints = {
+      wall:   "Click to place wall points.\nEach click adds a wall segment.\nClick near an existing point\nto connect or close a loop.",
+      select: "Click a wall or room\nto select and edit it.\nDrag corner points to reshape.",
+      window: "Click on any wall\nto place a window.",
+      door:   "Click on any wall\nto place a door.",
+      roof:   "Click to place roof vertices.\nClick near start (or Enter) to close.\nThen select edges to set type.",
+    };
     return (
       <div>
         <div style={{ background:"#0a1628",border:"1px solid #132040",borderRadius:4,padding:"10px",marginBottom:14,color:"#2d5a8a",fontSize:10,lineHeight:1.8,whiteSpace:"pre-line" }}>
           {hints[tool]}
         </div>
         <div style={{ color:"#2d5a8a",fontSize:9,letterSpacing:"0.12em",marginBottom:6 }}>ROOMS — {STOREY_LABELS[activeStorey].toUpperCase()}</div>
-        {rooms.length===0&&<div style={{ color:"#1b3660",fontSize:10,padding:"8px 0" }}>No rooms yet.</div>}
-        {rooms.map(r => {
-          const wins=(r.openings||[]).filter(o=>o.type==="window").length;
-          const drs =(r.openings||[]).filter(o=>o.type==="door").length;
+        {areas.length===0&&<div style={{ color:"#1b3660",fontSize:10,padding:"8px 0" }}>No enclosed rooms yet.</div>}
+        {areas.map(a => {
+          const wins=(a.openings||[]).filter(o=>o.type==="window").length;
+          const drs =(a.openings||[]).filter(o=>o.type==="door").length;
           return (
-            <div key={r.id} onClick={()=>{ setTool("select"); setSelectedId(r.id); }}
-              onMouseEnter={()=>setHoveredId(r.id)} onMouseLeave={()=>setHoveredId(null)}
-              style={{ padding:"5px 8px",marginBottom:3,borderRadius:3,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0a1628",border:`1px solid ${hoveredId===r.id?r.line+"80":"#132040"}` }}>
+            <div key={a.id} onClick={()=>{ setTool("select"); setSelectedId(a.id); setSelectedWallId(null); setSelectedOpening(null); }}
+              onMouseEnter={()=>setHoveredId(a.id)} onMouseLeave={()=>setHoveredId(null)}
+              style={{ padding:"5px 8px",marginBottom:3,borderRadius:3,cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0a1628",border:`1px solid ${hoveredId===a.id?a.line+"80":"#132040"}` }}>
               <div style={{ display:"flex",alignItems:"center",gap:6 }}>
-                <div style={{ width:6,height:6,borderRadius:"50%",background:r.line }}/>
-                <span style={{ color:"#c8d8f0",fontSize:11 }}>{r.name}</span>
+                <div style={{ width:6,height:6,borderRadius:"50%",background:a.line }}/>
+                <span style={{ color:"#c8d8f0",fontSize:11 }}>{a.name}</span>
                 {wins>0&&<span style={{ color:"#38bdf880",fontSize:8 }}>{wins}▭</span>}
                 {drs>0 &&<span style={{ color:"#a78bfa80",fontSize:8 }}>{drs}⬜</span>}
               </div>
-              <span style={{ color:"#2d5a8a",fontSize:9 }}>{area(r.points).toFixed(1)} m²</span>
+              <span style={{ color:"#2d5a8a",fontSize:9 }}>{area(a.points).toFixed(1)} m²</span>
             </div>
           );
         })}
-        {rooms.length>0&&(
+        {areas.length>0&&(
           <div style={{ display:"flex",justifyContent:"space-between",padding:"8px 0 0",borderTop:"1px solid #132040",marginTop:4 }}>
             <span style={{ color:"#2d5a8a",fontSize:9 }}>TOTAL</span>
             <span style={{ color:"#38bdf8",fontSize:11 }}>{totalArea.toFixed(1)} m²</span>
           </div>
         )}
         <div style={{ marginTop:20,color:"#2d5a8a",fontSize:9,letterSpacing:"0.12em",marginBottom:8 }}>SHORTCUTS</div>
-        {[["D","Draw"],["S","Select"],["W","Window"],["R","Door"],["F","Roof"],["Enter","Close polygon"],["Esc","Cancel"],["Del","Delete"],["⌃Z","Undo"],["⌃⇧Z","Redo"]].map(([k,v])=>(
+        {[["D","Wall"],["S","Select"],["W","Window"],["R","Door"],["F","Roof"],["Esc","Cancel"],["Del","Delete"],["⌃Z","Undo"],["⌃⇧Z","Redo"]].map(([k,v])=>(
           <div key={k} style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"3px 0",borderBottom:"1px solid #0a1628" }}>
             <span style={{ color:"#1e3a6b",background:"#0a1628",padding:"1px 5px",borderRadius:2,border:"1px solid #132040",fontSize:9 }}>{k}</span>
             <span style={{ color:"#2d5a8a",fontSize:9 }}>{v}</span>
@@ -1249,10 +1482,12 @@ export default function FloorPlanUI({ projectId }) {
 
   // ─── Render ───────────────────────────────────────────────────────────────
   const replaySetters = {
-    setRoomsByStorey, setCeilingHeights, setGlobalU, setBuildingRotation,
-    setSelectedId, setSelectedOpening, setDraft, setActiveStorey,
-    setRoofsByStorey,
+    setWallsByStorey, setOpeningsByStorey, setAreaMetaByStorey, setCeilingHeights,
+    setGlobalU, setBuildingRotation, setSelectedId, setSelectedWallId,
+    setSelectedOpening, setDraft, setActiveStorey, setRoofsByStorey,
   };
+
+  const storeyValid = hasClosedBoundary(walls);
 
   return (
     <div style={{ display:"flex",flexDirection:"column",height:"100%",flex:1,minHeight:0,background:"#05090f",color:"#c8d8f0",fontFamily:"monospace",overflow:"hidden" }}>
@@ -1263,7 +1498,7 @@ export default function FloorPlanUI({ projectId }) {
         <div style={{ width:1,height:20,background:"#132040" }}/>
         {tools.map(({ id, label, key }) => {
           const tc=toolColors[id], isActive=tool===id;
-          return <button key={id} onClick={()=>{ recorder.record("tool_change", { tool: id }); setTool(id); if(id!=="draw")setDraft([]); if(id!=="roof")setRoofDraft([]); }} style={{ padding:"5px 10px",background:isActive?tc.active:"transparent",color:isActive?tc.text:"#2d5a8a",border:`1px solid ${isActive?tc.border:"#132040"}`,borderRadius:5,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.07em",transition:"all 0.15s",display:"flex",alignItems:"center",gap:5 }}>{label}<span style={{opacity:0.4,fontSize:8}}>[{key}]</span></button>;
+          return <button key={id} onClick={()=>{ recorder.record("tool_change", { tool: id }); setTool(id); if(id!=="wall")setDraft([]); if(id!=="roof")setRoofDraft([]); }} style={{ padding:"5px 10px",background:isActive?tc.active:"transparent",color:isActive?tc.text:"#2d5a8a",border:`1px solid ${isActive?tc.border:"#132040"}`,borderRadius:5,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.07em",transition:"all 0.15s",display:"flex",alignItems:"center",gap:5 }}>{label}<span style={{opacity:0.4,fontSize:8}}>[{key}]</span></button>;
         })}
         <div style={{ width:1,height:20,background:"#132040" }}/>
         <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,cursor:"pointer",color:"#2d5a8a",userSelect:"none" }}>
@@ -1272,6 +1507,11 @@ export default function FloorPlanUI({ projectId }) {
         <label style={{ display:"flex",alignItems:"center",gap:5,fontSize:9,cursor:"pointer",color:activeStorey>0?"#2d5a8a":"#1a2d40",userSelect:"none" }}>
           <input type="checkbox" checked={showGhost} onChange={e=>setShowGhost(e.target.checked)} disabled={activeStorey===0} style={{ accentColor:"#38bdf8" }}/> Ghost
         </label>
+        {!storeyValid && (
+          <div style={{ display:"flex",alignItems:"center",gap:5,padding:"3px 8px",background:"#2d1000",border:"1px solid #f59e0b",borderRadius:4,color:"#fbbf24",fontSize:9,letterSpacing:"0.05em" }}>
+            ⚠ NO CLOSED BOUNDARY — heat-loss results will be inaccurate
+          </div>
+        )}
         <div style={{ flex:1 }}/>
         <span style={{ fontSize:9,color:"#1e3a6b" }}>{(zoom*100).toFixed(0)}%</span>
         {savedAt&&<span style={{ fontSize:9,color:"#1e4a30",letterSpacing:"0.08em" }}>● SAVED {savedAt.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}</span>}
@@ -1291,7 +1531,7 @@ export default function FloorPlanUI({ projectId }) {
         <div style={{ position:"absolute", top:10, right:10, zIndex:10, pointerEvents:"none" }}>
           <NorthOverlay rotation={buildingRotation} />
         </div>
-        <svg ref={svgRef} style={{ width:"100%",height:"100%",display:"block",cursor:(tool==="draw"||tool==="window"||tool==="door"||tool==="roof")?"crosshair":"default" }}
+        <svg ref={svgRef} style={{ width:"100%",height:"100%",display:"block",cursor:(tool==="wall"||tool==="window"||tool==="door"||tool==="roof")?"crosshair":"default" }}
           onMouseMove={onMouseMove} onMouseDown={onMouseDown} onMouseUp={onMouseUp} onClick={onCanvasClick}>
           <g transform={`translate(${pan.x},${pan.y}) scale(${zoom*PPM})`}>
             {renderGrid()}
@@ -1299,36 +1539,43 @@ export default function FloorPlanUI({ projectId }) {
             <line x1={0} y1={-0.3} x2={0} y2={0.3} stroke="#1b3660" strokeWidth={lw}/>
 
             {/* Ghost */}
-            {showGhost && activeStorey>0 && (roomsByStorey[activeStorey-1]||[]).map(room => {
-              const pts=room.points, pathD=pts.map((p,i)=>`${i?"L":"M"} ${p.x} ${p.y}`).join(" ")+" Z";
+            {showGhost && activeStorey>0 && (wallsByStorey[activeStorey-1]||[]).map(w => {
+              const wo = (openingsByStorey[activeStorey-1]||[]).filter(o=>o.wallId===w.id);
               return (
-                <g key={`ghost-${room.id}`} style={{ pointerEvents:"none" }}>
-                  <path d={pathD} fill="#4a7fa5" fillOpacity={0.04}/>
-                  {pts.map((p,i)=>{ const next=pts[(i+1)%pts.length],wo=(room.openings||[]).filter(o=>o.wallIdx===i);
-                    return <g key={i} opacity={0.22}>{wallWithOpenings(p,next,wo,"#6a9fc8",lw*2,false)}</g>; })}
+                <g key={`ghost-${w.id}`} style={{ pointerEvents:"none" }} opacity={0.22}>
+                  {wallWithOpenings(w.a, w.b, wo, "#6a9fc8", lw*2, false)}
                 </g>
               );
             })}
 
-            {/* Rooms */}
-            {rooms.map(room => {
-              const pts=room.points, pathD=pts.map((p,i)=>`${i?"L":"M"} ${p.x} ${p.y}`).join(" ")+" Z";
-              const c=centroid(pts), a=area(pts);
-              const isSel=selectedId===room.id, isHov=hoveredId===room.id;
+            {/* Areas */}
+            {areas.map(a => {
+              const pathD = a.points.map((p,i)=>`${i?"L":"M"} ${p.x} ${p.y}`).join(" ")+" Z";
+              const c=centroid(a.points), ar=area(a.points);
+              const isSel = selectedId===a.id;
               const fs=11.5/(zoom*PPM), fsSub=9/(zoom*PPM);
-              const wallCol=isSel?"#f59e0b":room.line;
               return (
-                <g key={room.id} onMouseEnter={()=>setHoveredId(room.id)} onMouseLeave={()=>setHoveredId(null)} onClick={e=>onRoomClick(e,room.id)}>
-                  <path d={pathD} fill={isSel?room.line+"26":room.bg} style={{ cursor:tool==="select"?"pointer":"crosshair" }}/>
-                  {pts.map((p,i)=>{ const next=pts[(i+1)%pts.length],wo=(room.openings||[]).filter(o=>o.wallIdx===i);
-                    return <g key={i}>{wallWithOpenings(p,next,wo,wallCol,(isSel||isHov)?lw*3:lw*2,false)}{isSel&&renderMeasurement(p,next,`m-${room.id}-${i}`)}</g>; })}
-                  <text x={c.x} y={c.y-fs*0.55} fontSize={fs} fill={room.label} textAnchor="middle" fontWeight="700" style={{userSelect:"none",letterSpacing:"0.08em",pointerEvents:"none"}}>{room.name.toUpperCase()}</text>
-                  <text x={c.x} y={c.y+fs*0.75} fontSize={fsSub} fill={room.line} textAnchor="middle" opacity={0.7} style={{userSelect:"none",pointerEvents:"none"}}>{a.toFixed(1)} m²</text>
-                  {isSel&&pts.map((p,i)=><circle key={i} cx={p.x} cy={p.y} r={5.5/(zoom*PPM)} fill="#f59e0b" stroke="#fff4" strokeWidth={lw} style={{cursor:"move"}} onMouseDown={e=>onVertexMouseDown(e,room.id,i)}/>)}
-                  {(room.openings||[]).map(o=>{ if(selectedOpening?.openingId!==o.id)return null;
-                    const ptA=pts[o.wallIdx],ptB=pts[(o.wallIdx+1)%pts.length],wLen=dist(ptA,ptB);
-                    const dir={x:(ptB.x-ptA.x)/wLen,y:(ptB.y-ptA.y)/wLen};
-                    const mid={x:ptA.x+dir.x*(o.offset+o.width/2),y:ptA.y+dir.y*(o.offset+o.width/2)};
+                <g key={a.id} onMouseEnter={()=>setHoveredId(a.id)} onMouseLeave={()=>setHoveredId(null)}>
+                  <path d={pathD} fill={isSel?a.line+"26":a.bg} style={{ cursor:tool==="select"?"pointer":"default" }}/>
+                  <text x={c.x} y={c.y-fs*0.55} fontSize={fs} fill={a.label} textAnchor="middle" fontWeight="700" style={{userSelect:"none",letterSpacing:"0.08em",pointerEvents:"none"}}>{a.name.toUpperCase()}</text>
+                  <text x={c.x} y={c.y+fs*0.75} fontSize={fsSub} fill={a.line} textAnchor="middle" opacity={0.7} style={{userSelect:"none",pointerEvents:"none"}}>{ar.toFixed(1)} m²</text>
+                  {isSel && a.points.map((p,i)=><circle key={i} cx={p.x} cy={p.y} r={5.5/(zoom*PPM)} fill="#f59e0b" stroke="#fff4" strokeWidth={lw} style={{cursor:"move"}} onMouseDown={e=>onVertexMouseDown(e,p)}/>)}
+                </g>
+              );
+            })}
+
+            {/* Walls */}
+            {walls.map(w => {
+              const wo = openings.filter(o=>o.wallId===w.id);
+              const isSel = selectedWallId===w.id;
+              const col = isSel ? "#f59e0b" : "#6a9fc8";
+              return (
+                <g key={w.id}>
+                  {wallWithOpenings(w.a, w.b, wo, col, isSel?lw*3:lw*2, false)}
+                  {isSel && renderMeasurement(w.a, w.b, `m-${w.id}`)}
+                  {wo.map(o=>{ if(selectedOpening?.openingId!==o.id)return null;
+                    const wLen=dist(w.a,w.b), dir={x:(w.b.x-w.a.x)/wLen,y:(w.b.y-w.a.y)/wLen};
+                    const mid={x:w.a.x+dir.x*(o.offset+o.width/2), y:w.a.y+dir.y*(o.offset+o.width/2)};
                     return <circle key={o.id} cx={mid.x} cy={mid.y} r={5/(zoom*PPM)} fill="none" stroke="#f59e0b" strokeWidth={lw*1.5}/>; })}
                 </g>
               );
@@ -1342,7 +1589,7 @@ export default function FloorPlanUI({ projectId }) {
               const isSel = selectedRoofId === roof.id;
               const ridgeLines = computeRoofLines(rp, roof.edgeTypes);
               return (
-                <g key={roof.id} onClick={e => { if(tool==="select"||tool==="roof"){e.stopPropagation();setSelectedRoofId(roof.id);setSelectedRoofEdge(null);setSelectedId(null);setSelectedOpening(null);} }}>
+                <g key={roof.id} onClick={e => { if(tool==="select"||tool==="roof"){e.stopPropagation();setSelectedRoofId(roof.id);setSelectedRoofEdge(null);setSelectedId(null);setSelectedWallId(null);setSelectedOpening(null);} }}>
                   {/* Ridge/hip lines — faint */}
                   {ridgeLines.map((seg, si) => (
                     <line key={si} x1={seg.x1} y1={seg.y1} x2={seg.x2} y2={seg.y2}
@@ -1378,18 +1625,16 @@ export default function FloorPlanUI({ projectId }) {
             })}
 
             {/* Wall hover */}
-            {wallHover&&(()=>{ const room=rooms.find(r=>r.id===wallHover.roomId); if(!room)return null;
-              const pts=room.points,ptA=pts[wallHover.wallIdx],ptB=pts[(wallHover.wallIdx+1)%pts.length];
-              const prev=[{id:"preview",type:tool,wallIdx:0,offset:wallHover.offset,width:OPENING_DEFAULTS[tool].width}];
-              return <g><line x1={ptA.x} y1={ptA.y} x2={ptB.x} y2={ptB.y} stroke={tool==="window"?"#38bdf840":"#a78bfa40"} strokeWidth={lw*5} strokeLinecap="round"/>
-                {wallWithOpenings(ptA,ptB,prev,room.line,lw*2,true)}</g>; })()}
+            {wallHover&&(()=>{ const w=walls.find(ww=>ww.id===wallHover.wallId); if(!w)return null;
+              const prev=[{id:"preview",type:tool,wallId:w.id,offset:wallHover.offset,width:OPENING_DEFAULTS[tool].width}];
+              return <g><line x1={w.a.x} y1={w.a.y} x2={w.b.x} y2={w.b.y} stroke={tool==="window"?"#38bdf840":"#a78bfa40"} strokeWidth={lw*5} strokeLinecap="round"/>
+                {wallWithOpenings(w.a,w.b,prev,"#6a9fc8",lw*2,true)}</g>; })()}
 
             {/* Draft */}
-            {draft.length>0&&(()=>{ const nearClose=draft.length>=3&&dist(cursor,draft[0])<closeThreshold;
+            {draft.length>0&&(()=>{
               return <g>
                 {draft.map((p,i)=>i===0?null:<line key={i} x1={draft[i-1].x} y1={draft[i-1].y} x2={p.x} y2={p.y} stroke="#38bdf8" strokeWidth={lw*2.5} strokeLinecap="round"/>)}
                 <line x1={draft[draft.length-1].x} y1={draft[draft.length-1].y} x2={cursor.x} y2={cursor.y} stroke="#38bdf8" strokeWidth={lw} opacity={0.5} strokeDasharray={`${0.1} ${0.07}`}/>
-                {nearClose&&<circle cx={draft[0].x} cy={draft[0].y} r={9/(zoom*PPM)} fill="#38bdf820" stroke="#38bdf8" strokeWidth={lw*1.5}/>}
                 {renderMeasurement(draft[draft.length-1],cursor,"prev")}
                 {draft.map((p,i)=><circle key={i} cx={p.x} cy={p.y} r={i===0?6/(zoom*PPM):4/(zoom*PPM)} fill={i===0?"#38bdf8":"#1a4060"} stroke="#38bdf8" strokeWidth={lw}/>)}
                 <circle cx={cursor.x} cy={cursor.y} r={3/(zoom*PPM)} fill="#38bdf8" opacity={0.8}/>
@@ -1407,7 +1652,7 @@ export default function FloorPlanUI({ projectId }) {
               </g>;
             })()}
 
-            {tool==="draw"&&draft.length===0&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill="#38bdf8" opacity={0.5}/>}
+            {tool==="wall"&&draft.length===0&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill="#38bdf8" opacity={0.5}/>}
             {(tool==="window"||tool==="door")&&!wallHover&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill={tool==="window"?"#38bdf8":"#a78bfa"} opacity={0.5}/>}
             {tool==="roof"&&roofDraft.length===0&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill="#f59e0b" opacity={0.5}/>}
           </g>
@@ -1485,7 +1730,7 @@ export default function FloorPlanUI({ projectId }) {
       <div style={{ display:"flex",alignItems:"center",background:"#070d1a",borderTop:"1px solid #132040",padding:"0 12px",height:44,flexShrink:0,gap:4 }}>
         <span style={{ color:"#1e3a6b",fontSize:9,marginRight:4,letterSpacing:"0.15em",flexShrink:0 }}>STOREY</span>
         {STOREY_LABELS.map((label,i)=>{ const isActive=activeStorey===i;
-          return <button key={i} onClick={()=>{ recorder.record("storey_change", { storey: i }); setActiveStorey(i); setSelectedId(null); setSelectedOpening(null); setDraft([]); setSelectedRoofId(null); setSelectedRoofEdge(null); setRoofDraft([]); }} style={{ padding:"4px 10px",height:32,background:isActive?"#1e4a7a":"#0a1628",color:isActive?"#7dd3fc":"#2d5a8a",border:`1px solid ${isActive?"#2563eb":"#132040"}`,borderRadius:6,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.06em",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",lineHeight:1.2,transition:"all 0.15s",flexShrink:0 }}>
+          return <button key={i} onClick={()=>{ recorder.record("storey_change", { storey: i }); setActiveStorey(i); setSelectedId(null); setSelectedWallId(null); setSelectedOpening(null); setDraft([]); setSelectedRoofId(null); setSelectedRoofEdge(null); setRoofDraft([]); }} style={{ padding:"4px 10px",height:32,background:isActive?"#1e4a7a":"#0a1628",color:isActive?"#7dd3fc":"#2d5a8a",border:`1px solid ${isActive?"#2563eb":"#132040"}`,borderRadius:6,cursor:"pointer",fontSize:10,fontFamily:"monospace",letterSpacing:"0.06em",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",lineHeight:1.2,transition:"all 0.15s",flexShrink:0 }}>
             <span>{label.toUpperCase()}</span>
             <span style={{ fontSize:7,opacity:0.6,color:isActive?"#38bdf8":"#1e3a6b" }}>{ceilingHeights[i].toFixed(1)}m</span>
           </button>; })}
