@@ -1746,7 +1746,6 @@ export default function FloorPlanUI({ projectId }) {
                   <path d={pathD} fill={isSel?a.line+"26":a.bg} style={{ cursor:tool==="select"?"pointer":"default" }}/>
                   <text x={c.x} y={c.y-fs*0.55} fontSize={fs} fill={a.label} textAnchor="middle" fontWeight="700" style={{userSelect:"none",letterSpacing:"0.08em",pointerEvents:"none"}}>{a.name.toUpperCase()}</text>
                   <text x={c.x} y={c.y+fs*0.75} fontSize={fsSub} fill={a.line} textAnchor="middle" opacity={0.7} style={{userSelect:"none",pointerEvents:"none"}}>{ar.toFixed(1)} m²</text>
-                  {isSel && a.points.map((p,i)=><circle key={i} cx={p.x} cy={p.y} r={5.5/(zoom*PPM)} fill="#f59e0b" stroke="#fff4" strokeWidth={lw} style={{cursor:"move"}} onMouseDown={e=>onVertexMouseDown(e,p)}/>)}
                 </g>
               );
             })}
@@ -1846,6 +1845,15 @@ export default function FloorPlanUI({ projectId }) {
             {tool==="wall"&&draft.length===0&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill="#38bdf8" opacity={0.5}/>}
             {(tool==="window"||tool==="door")&&!wallHover&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill={tool==="window"?"#38bdf8":"#a78bfa"} opacity={0.5}/>}
             {tool==="roof"&&roofDraft.length===0&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill="#f59e0b" opacity={0.5}/>}
+
+            {/* Editable vertex handles — rendered last so they sit above all walls/areas */}
+            {(() => {
+              const selArea = areas.find(a => a.id === selectedId);
+              const handlePoints = selArea ? selArea.points
+                : selectedWall ? [selectedWall.a, selectedWall.b]
+                : [];
+              return handlePoints.map((p,i)=><circle key={i} cx={p.x} cy={p.y} r={5.5/(zoom*PPM)} fill="#f59e0b" stroke="#fff4" strokeWidth={lw} style={{cursor:"move"}} onMouseDown={e=>onVertexMouseDown(e,p)}/>);
+            })()}
           </g>
         </svg>
         </div>{/* end canvas wrapper */}
