@@ -14,6 +14,17 @@ const VERTEX_TOL = 0.05;
 const SNAP_PX = 10; // geometry-snap radius, in screen pixels
 const SRC_PRIORITY = { last: 0, endpoint: 1 };
 
+// Build a faint guide line from the resolved point to the existing-wall
+// endpoint that an axis snapped into alignment with (priority 3 only —
+// `last`-based snapping doesn't get a guide since `last` is already visible
+// on screen as the previous drafted point).
+const axisGuide = (axis, point, ax) => {
+  const ref = axis === "x" ? ax.xRef : ax.yRef;
+  const src = axis === "x" ? ax.xSrc : ax.ySrc;
+  if (src !== "endpoint" || !ref) return null;
+  return { x1: point.x, y1: point.y, x2: ref.x, y2: ref.y };
+};
+
 const OPENING_DEFAULTS = {
   window: { width: 1.2, height: 1.2, sillHeight: 0.9 },
   door:   { width: 0.9, height: 2.1, sillHeight: 0.0 },
@@ -711,6 +722,7 @@ export default function FloorPlanUI({ projectId }) {
   const [cursor,    setCursor]    = useState({ x:0, y:0 });
   const [snapOn,    setSnapOn]    = useState(true);
   const [gridSnap,  setGridSnap]  = useState(false);
+  const [snapGuides, setSnapGuides] = useState([]);
   const [showGhost, setShowGhost] = useState(true);
 
   // ── Roof drawing & selection ──
@@ -803,7 +815,7 @@ export default function FloorPlanUI({ projectId }) {
   // slide along its line to match it.
   const axisSnap = useCallback((pt, last) => {
     const r = SNAP_PX / (zoomRef.current * PPM);
-    let { x, y } = pt, xSrc = null, ySrc = null;
+    let { x, y } = pt, xSrc = null, ySrc = null, xRef = null, yRef = null;
 
     if (last) {
       if (Math.abs(pt.y - last.y) < r) { y = last.y; ySrc = "last"; }
@@ -813,12 +825,12 @@ export default function FloorPlanUI({ projectId }) {
       let bestXd = r, bestYd = r;
       for (const w of wallsRef.current) {
         for (const ep of [w.a, w.b]) {
-          if (!xSrc) { const d = Math.abs(pt.x - ep.x); if (d < bestXd) { bestXd = d; x = ep.x; xSrc = "endpoint"; } }
-          if (!ySrc) { const d = Math.abs(pt.y - ep.y); if (d < bestYd) { bestYd = d; y = ep.y; ySrc = "endpoint"; } }
+          if (!xSrc) { const d = Math.abs(pt.x - ep.x); if (d < bestXd) { bestXd = d; x = ep.x; xSrc = "endpoint"; xRef = ep; } }
+          if (!ySrc) { const d = Math.abs(pt.y - ep.y); if (d < bestYd) { bestYd = d; y = ep.y; ySrc = "endpoint"; yRef = ep; } }
         }
       }
     }
-    return { x, y, xSrc, ySrc };
+    return { x, y, xSrc, ySrc, xRef, yRef };
   }, []);
 
   // Resolve a candidate point under the cursor, given the previous drafted
@@ -829,10 +841,10 @@ export default function FloorPlanUI({ projectId }) {
   // line) it actually constrains, so it combines with axis-snapping on the
   // remaining degree of freedom.
   const getSnappedPoint = useCallback((pt, last = null) => {
-    if (gridSnap) return snapToExisting(pt) || (snapOn ? snapPt(pt) : pt);
-    if (!snapOn) return pt;
+    if (gridSnap) return { ...(snapToExisting(pt) || (snapOn ? snapPt(pt) : pt)), guides: [] };
+    if (!snapOn) return { ...pt, guides: [] };
     const geo = wallGeometrySnap(pt);
-    if (geo && geo.lockX && geo.lockY) return geo.point;
+    if (geo && geo.lockX && geo.lockY) return { ...geo.point, guides: [] };
     const ax = axisSnap(pt, last);
     if (geo && geo.line) {
       const { a, b } = geo.line;
@@ -840,17 +852,25 @@ export default function FloorPlanUI({ projectId }) {
       const xRank = ax.xSrc ? SRC_PRIORITY[ax.xSrc] : Infinity;
       const yRank = ax.ySrc ? SRC_PRIORITY[ax.ySrc] : Infinity;
       if (xRank <= yRank && xRank < Infinity) {
-        return { x: ax.x, y: a.y + (ax.x - a.x) * dy / dx };
+        const point = { x: ax.x, y: a.y + (ax.x - a.x) * dy / dx };
+        const g = axisGuide("x", point, ax);
+        return { ...point, guides: g ? [g] : [] };
       }
       if (yRank < Infinity) {
-        return { x: a.x + (ax.y - a.y) * dx / dy, y: ax.y };
+        const point = { x: a.x + (ax.y - a.y) * dx / dy, y: ax.y };
+        const g = axisGuide("y", point, ax);
+        return { ...point, guides: g ? [g] : [] };
       }
-      return geo.point;
+      return { ...geo.point, guides: [] };
     }
-    return {
+    const point = {
       x: geo && geo.lockX ? geo.point.x : ax.x,
       y: geo && geo.lockY ? geo.point.y : ax.y,
     };
+    const guides = [];
+    if (!(geo && geo.lockX)) { const g = axisGuide("x", point, ax); if (g) guides.push(g); }
+    if (!(geo && geo.lockY)) { const g = axisGuide("y", point, ax); if (g) guides.push(g); }
+    return { ...point, guides };
   }, [gridSnap, snapOn, snapToExisting, snapPt, wallGeometrySnap, axisSnap]);
 
   // ── Wall hover (for placing windows/doors) ──
@@ -916,8 +936,10 @@ export default function FloorPlanUI({ projectId }) {
     const last = tool === "wall" ? (draft.length ? draft[draft.length-1] : null)
       : tool === "roof" ? (roofDraft.length ? roofDraft[roofDraft.length-1] : null)
       : null;
-    const pt = getSnappedPoint(raw, last);
+    const snapped = getSnappedPoint(raw, last);
+    const pt = { x: snapped.x, y: snapped.y };
     setCursor(pt);
+    setSnapGuides(snapped.guides);
     if (dragVertex.current) {
       const origin = dragVertex.current.point;
       setWalls(ws => ws.map(w => {
@@ -953,7 +975,8 @@ export default function FloorPlanUI({ projectId }) {
     const last = tool === "wall" ? (draft.length ? draft[draft.length-1] : null)
       : tool === "roof" ? (roofDraft.length ? roofDraft[roofDraft.length-1] : null)
       : null;
-    const pt = getSnappedPoint(rawPt, last);
+    const snapped = getSnappedPoint(rawPt, last);
+    const pt = { x: snapped.x, y: snapped.y };
 
     if (tool === "window" || tool === "door") {
       const wh = findWallHover(rawPt, walls, OPENING_DEFAULTS[tool].width);
@@ -1760,6 +1783,10 @@ export default function FloorPlanUI({ projectId }) {
                 <circle cx={cursor.x} cy={cursor.y} r={3/(zoom*PPM)} fill="#f59e0b" opacity={0.8}/>
               </g>;
             })()}
+
+            {(tool==="wall"||tool==="roof")&&snapGuides.map((g,i)=>
+              <line key={i} x1={g.x1} y1={g.y1} x2={g.x2} y2={g.y2}
+                stroke="#38bdf8" strokeWidth={lw} opacity={0.35} strokeDasharray={`${0.06} ${0.06}`}/>)}
 
             {tool==="wall"&&draft.length===0&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill="#38bdf8" opacity={0.5}/>}
             {(tool==="window"||tool==="door")&&!wallHover&&<circle cx={cursor.x} cy={cursor.y} r={2.5/(zoom*PPM)} fill={tool==="window"?"#38bdf8":"#a78bfa"} opacity={0.5}/>}
