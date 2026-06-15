@@ -1020,7 +1020,11 @@ export default function FloorPlanUI({ projectId }) {
       e.preventDefault();
       const r = svg.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
       const factor = e.deltaY < 0 ? 1.12 : 1/1.12;
-      setZoom(pz => { const nz = Math.min(8, Math.max(0.15, pz*factor)); zoomRef.current = nz; setPan(pp => { const np = { x:mx-(mx-pp.x)*nz/pz, y:my-(my-pp.y)*nz/pz }; panRef.current=np; return np; }); return nz; });
+      const pz = zoomRef.current, pp = panRef.current;
+      const nz = Math.min(8, Math.max(0.15, pz*factor));
+      const np = { x: mx-(mx-pp.x)*nz/pz, y: my-(my-pp.y)*nz/pz };
+      zoomRef.current = nz; panRef.current = np;
+      setZoom(nz); setPan(np);
     };
     svg.addEventListener("wheel", fn, { passive: false });
     return () => svg.removeEventListener("wheel", fn);
