@@ -22,6 +22,41 @@ export function mergeVertices(walls, tol = 0.05) {
 }
 
 /**
+ * Split edges at "T-junctions" — vertices that land on the interior of
+ * another wall's segment (e.g. a partition wall drawn from one wall to the
+ * middle of the opposite wall). Each affected edge is broken into a chain of
+ * sub-edges through the intersecting vertices, all referencing the original
+ * wall, so the resulting graph has a proper vertex at every junction.
+ */
+function splitAtTJunctions(vertices, edges, tol) {
+  const result = [];
+  for (const e of edges) {
+    const { a, b } = e;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    if (len2 === 0) { result.push(e); continue; }
+    const onEdge = [];
+    for (const v of vertices) {
+      if (v.id === a.id || v.id === b.id) continue;
+      const t = ((v.x - a.x) * dx + (v.y - a.y) * dy) / len2;
+      if (t <= 0 || t >= 1) continue;
+      const projx = a.x + t * dx, projy = a.y + t * dy;
+      const d = Math.hypot(v.x - projx, v.y - projy);
+      if (d < tol) onEdge.push({ v, t });
+    }
+    if (onEdge.length === 0) { result.push(e); continue; }
+    onEdge.sort((p, q) => p.t - q.t);
+    let prev = a;
+    for (const { v } of onEdge) {
+      result.push({ wall: e.wall, a: prev, b: v });
+      prev = v;
+    }
+    result.push({ wall: e.wall, a: prev, b });
+  }
+  return result;
+}
+
+/**
  * Find enclosed areas formed by a set of wall segments via planar
  * straight-line-graph face tracing.
  *
@@ -29,8 +64,9 @@ export function mergeVertices(walls, tol = 0.05) {
  * `points[i]` -> `points[i+1]` is the edge formed by `wallIds[i]`.
  */
 export function findClosedAreas(walls, tol = 0.05) {
-  const { edges } = mergeVertices(walls, tol);
-  const validEdges = edges.filter((e) => e.a.id !== e.b.id);
+  const { vertices, edges } = mergeVertices(walls, tol);
+  const splitEdges = splitAtTJunctions(vertices, edges, tol);
+  const validEdges = splitEdges.filter((e) => e.a.id !== e.b.id);
   if (validEdges.length === 0) return [];
 
   // Build half-edge adjacency lists per vertex, sorted by outgoing angle.
