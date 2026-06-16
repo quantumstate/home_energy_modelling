@@ -958,26 +958,36 @@ export default function FloorPlanUI({ projectId }) {
       // While dragging a vertex, skip geometry snapping (which would snap to the
       // vertex's own old position) and use only axis alignment against other endpoints.
       if (snapOn && !gridSnap) {
-        const { draggedWallIds } = dragVertex.current;
+        const { draggedWallIds, fixedEndpoints } = dragVertex.current;
         const r = SNAP_PX / (zoomRef.current * PPM);
         let { x, y } = raw;
-        let bestXd = r, bestYd = r;
+        let bestXd = r, bestYd = r, xRef = null, yRef = null;
+        // Fixed ends of dragged walls + all endpoints of non-dragged walls
+        const refs = [...fixedEndpoints];
         for (const w of wallsRef.current) {
-          if (draggedWallIds.has(w.id)) continue; // skip walls containing the dragged vertex
-          for (const ep of [w.a, w.b]) {
-            const dx = Math.abs(raw.x - ep.x);
-            const dy = Math.abs(raw.y - ep.y);
-            if (dx < bestXd) { bestXd = dx; x = ep.x; }
-            if (dy < bestYd) { bestYd = dy; y = ep.y; }
-          }
+          if (!draggedWallIds.has(w.id)) refs.push(w.a, w.b);
+        }
+        for (const ep of refs) {
+          const dx = Math.abs(raw.x - ep.x);
+          const dy = Math.abs(raw.y - ep.y);
+          if (dx < bestXd) { bestXd = dx; x = ep.x; xRef = ep; }
+          if (dy < bestYd) { bestYd = dy; y = ep.y; yRef = ep; }
         }
         pt = { x, y };
+        const guides = [];
+        if (xRef) guides.push({ x1: pt.x, y1: pt.y, x2: xRef.x, y2: xRef.y });
+        if (yRef) guides.push({ x1: pt.x, y1: pt.y, x2: yRef.x, y2: yRef.y });
+        setSnapGuides(guides);
       } else {
         pt = raw;
+        setSnapGuides([]);
       }
-      setSnapGuides([]);
     } else if (tool === "wall" && draft.length > 0 && lengthInput) {
       pt = lengthSnappedPoint(raw, draft[draft.length-1], parseFloat(lengthInput) || 0);
+      setSnapGuides([]);
+    } else if (tool === "select") {
+      // No snapping or guides needed for plain cursor movement in select mode.
+      pt = raw;
       setSnapGuides([]);
     } else {
       const snapped = getSnappedPoint(raw, last);
@@ -1012,8 +1022,9 @@ export default function FloorPlanUI({ projectId }) {
     if (dragVertex.current) {
       recorder.record("vertex_drag_end", { point: dragVertex.current.point });
       dragVertex.current = null;
+      setSnapGuides([]);
     }
-  }, []);
+  }, [setSnapGuides]);
 
   const onCanvasClick = useCallback((e) => {
     if (panState.current.active) return;
@@ -1154,12 +1165,13 @@ export default function FloorPlanUI({ projectId }) {
     e.stopPropagation();
     // Record which wall IDs contain this vertex so the drag snap can exclude them
     // without relying on distance comparisons that break at high mouse speed.
-    const draggedWallIds = new Set(
-      wallsRef.current
-        .filter(w => dist(w.a, point) < VERTEX_TOL || dist(w.b, point) < VERTEX_TOL)
-        .map(w => w.id)
-    );
-    dragVertex.current = { point, draggedWallIds };
+    const draggedWalls = wallsRef.current
+      .filter(w => dist(w.a, point) < VERTEX_TOL || dist(w.b, point) < VERTEX_TOL);
+    const draggedWallIds = new Set(draggedWalls.map(w => w.id));
+    // Fixed ends: the OTHER endpoint of each dragged wall (the end not being moved).
+    // Included as snap references so you can align H/V with your own wall's far end.
+    const fixedEndpoints = draggedWalls.map(w => dist(w.a, point) < VERTEX_TOL ? w.b : w.a);
+    dragVertex.current = { point, draggedWallIds, fixedEndpoints };
   }, [tool]);
 
 
@@ -1868,7 +1880,7 @@ export default function FloorPlanUI({ projectId }) {
               </g>;
             })()}
 
-            {(tool==="wall"||tool==="roof")&&snapGuides.map((g,i)=>
+            {snapGuides.map((g,i)=>
               <line key={i} x1={g.x1} y1={g.y1} x2={g.x2} y2={g.y2}
                 stroke="#38bdf8" strokeWidth={lw} opacity={0.35} strokeDasharray={`${0.06} ${0.06}`}/>)}
 
