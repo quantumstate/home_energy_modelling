@@ -51,6 +51,35 @@ const centroid = (pts) => ({
   x: pts.reduce((s, p) => s + p.x, 0) / pts.length,
   y: pts.reduce((s, p) => s + p.y, 0) / pts.length,
 });
+const visualCenter = (pts) => {
+  // True area-weighted centroid
+  let cx = 0, cy = 0, a = 0;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const cross = pts[j].x * pts[i].y - pts[i].x * pts[j].y;
+    a += cross; cx += (pts[j].x + pts[i].x) * cross; cy += (pts[j].y + pts[i].y) * cross;
+  }
+  a /= 2; cx /= 6 * a; cy /= 6 * a;
+  if (pointInPoly({ x: cx, y: cy }, pts)) return { x: cx, y: cy };
+  // Fallback: scanline at candidate y values, pick midpoint of widest interior interval
+  const scanX = (y) => {
+    const xs = [];
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const { x: xi, y: yi } = pts[i], { x: xj, y: yj } = pts[j];
+      if ((yi <= y && y < yj) || (yj <= y && y < yi))
+        xs.push(xj + (y - yj) * (xi - xj) / (yi - yj));
+    }
+    xs.sort((a, b) => a - b);
+    let best = null, bestLen = 0;
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const len = xs[k + 1] - xs[k];
+      if (len > bestLen) { bestLen = len; best = (xs[k] + xs[k + 1]) / 2; }
+    }
+    return best;
+  };
+  const ys = [cy, ...pts.map((_, i) => (pts[i].y + pts[(i + 1) % pts.length].y) / 2)];
+  for (const y of ys) { const x = scanX(y); if (x !== null) return { x, y }; }
+  return { x: cx, y: cy };
+};
 const pointInPoly = (pt, poly) => {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -1798,7 +1827,7 @@ export default function FloorPlanUI({ projectId }) {
             {/* Areas */}
             {areas.map(a => {
               const pathD = a.points.map((p,i)=>`${i?"L":"M"} ${p.x} ${p.y}`).join(" ")+" Z";
-              const c=centroid(a.points), ar=area(a.points);
+              const c=visualCenter(a.points), ar=area(a.points);
               const isSel = selectedId===a.id;
               const fs=11.5/(zoom*PPM), fsSub=9/(zoom*PPM);
               return (
