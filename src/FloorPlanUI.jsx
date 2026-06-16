@@ -954,7 +954,29 @@ export default function FloorPlanUI({ projectId }) {
       : tool === "roof" ? (roofDraft.length ? roofDraft[roofDraft.length-1] : null)
       : null;
     let pt;
-    if (tool === "wall" && draft.length > 0 && lengthInput) {
+    if (dragVertex.current) {
+      // While dragging a vertex, skip geometry snapping (which would snap to the
+      // vertex's own old position) and use only axis alignment against other endpoints.
+      if (snapOn && !gridSnap) {
+        const { draggedWallIds } = dragVertex.current;
+        const r = SNAP_PX / (zoomRef.current * PPM);
+        let { x, y } = raw;
+        let bestXd = r, bestYd = r;
+        for (const w of wallsRef.current) {
+          if (draggedWallIds.has(w.id)) continue; // skip walls containing the dragged vertex
+          for (const ep of [w.a, w.b]) {
+            const dx = Math.abs(raw.x - ep.x);
+            const dy = Math.abs(raw.y - ep.y);
+            if (dx < bestXd) { bestXd = dx; x = ep.x; }
+            if (dy < bestYd) { bestYd = dy; y = ep.y; }
+          }
+        }
+        pt = { x, y };
+      } else {
+        pt = raw;
+      }
+      setSnapGuides([]);
+    } else if (tool === "wall" && draft.length > 0 && lengthInput) {
       pt = lengthSnappedPoint(raw, draft[draft.length-1], parseFloat(lengthInput) || 0);
       setSnapGuides([]);
     } else {
@@ -976,7 +998,7 @@ export default function FloorPlanUI({ projectId }) {
     }
     if (tool === "window" || tool === "door") setWallHover(findWallHover(raw, wallsRef.current, OPENING_DEFAULTS[tool].width));
     else setWallHover(null);
-  }, [svgPt, getSnappedPoint, tool, draft, roofDraft, findWallHover, setWalls, lengthInput, lengthSnappedPoint]);
+  }, [svgPt, getSnappedPoint, tool, draft, roofDraft, findWallHover, setWalls, lengthInput, lengthSnappedPoint, snapOn, gridSnap]);
 
   const onMouseDown = useCallback((e) => {
     if (e.button === 1 || (e.button === 0 && e.altKey)) {
@@ -1129,7 +1151,14 @@ export default function FloorPlanUI({ projectId }) {
   const onVertexMouseDown = useCallback((e, point) => {
     if (tool !== "select") return;
     e.stopPropagation();
-    dragVertex.current = { point };
+    // Record which wall IDs contain this vertex so the drag snap can exclude them
+    // without relying on distance comparisons that break at high mouse speed.
+    const draggedWallIds = new Set(
+      wallsRef.current
+        .filter(w => dist(w.a, point) < VERTEX_TOL || dist(w.b, point) < VERTEX_TOL)
+        .map(w => w.id)
+    );
+    dragVertex.current = { point, draggedWallIds };
   }, [tool]);
 
 
