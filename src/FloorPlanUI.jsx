@@ -986,8 +986,9 @@ export default function FloorPlanUI({ projectId }) {
     }
     setCursor(pt);
     if (dragVertex.current) {
-      const origin = dragVertex.current.point;
+      const { point: origin, draggedWallIds } = dragVertex.current;
       setWalls(ws => ws.map(w => {
+        if (!draggedWallIds.has(w.id)) return w;
         let a = w.a, b = w.b;
         if (dist(w.a, origin) < VERTEX_TOL) a = pt;
         if (dist(w.b, origin) < VERTEX_TOL) b = pt;
