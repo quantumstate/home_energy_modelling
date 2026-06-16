@@ -6,7 +6,7 @@ import {
   DEFAULT_CONDITION_ID,
   SIDES,
   getEdgeSegment,
-  isEdgeShared,
+  getExposedSegments,
   edgeKey,
   distToSegment,
 } from "./thermalBridgeGeometry.js";
@@ -174,7 +174,7 @@ export default function ThermalBridgesTab({ projectId }) {
   // elements may not have one, external edges default to adiabatic.
   const getEdgeCondition = useCallback(
     (shapeId, side) => {
-      if (isEdgeShared(shapes, shapeId, side)) return null;
+      if (getExposedSegments(shapes, shapeId, side).length === 0) return null;
       return edgeConditions[edgeKey(shapeId, side)] || DEFAULT_CONDITION_ID;
     },
     [shapes, edgeConditions]
@@ -539,44 +539,50 @@ export default function ThermalBridgesTab({ projectId }) {
     if (tool === "boundary") {
       for (const shape of shapes) {
         for (const side of SIDES) {
-          const seg = getEdgeSegment(shape, side);
-          const a = { x: offsetX + seg.a.x * scale, y: offsetY + seg.a.y * scale };
-          const b = { x: offsetX + seg.b.x * scale, y: offsetY + seg.b.y * scale };
-          const shared = isEdgeShared(shapes, shape.id, side);
+          const fullSeg = getEdgeSegment(shape, side);
+          const exposedSegs = getExposedSegments(shapes, shape.id, side);
           const isSelected = selectedEdge && selectedEdge.shapeId === shape.id && selectedEdge.side === side;
 
-          if (shared) {
-            ctx.strokeStyle = "#33415580";
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([3, 3]);
-            ctx.beginPath();
-            ctx.moveTo(a.x, a.y);
-            ctx.lineTo(b.x, b.y);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            continue;
-          }
+          // Draw the full edge as dashed grey to show shared/internal portions
+          const aFull = { x: offsetX + fullSeg.a.x * scale, y: offsetY + fullSeg.a.y * scale };
+          const bFull = { x: offsetX + fullSeg.b.x * scale, y: offsetY + fullSeg.b.y * scale };
+          ctx.strokeStyle = "#33415580";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.moveTo(aFull.x, aFull.y);
+          ctx.lineTo(bFull.x, bFull.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
 
+          if (exposedSegs.length === 0) continue;
+
+          // Draw each exposed sub-segment over the dashed line
           const conditionId = getEdgeCondition(shape.id, side);
           const condition = CONDITIONS.find((c) => c.id === conditionId) || CONDITIONS[CONDITIONS.length - 1];
-          ctx.strokeStyle = condition.color;
-          ctx.lineWidth = isSelected ? 6 : 4;
-          ctx.lineCap = "round";
-          ctx.beginPath();
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
-          ctx.stroke();
-          ctx.lineCap = "butt";
 
-          if (isSelected) {
-            ctx.strokeStyle = "#7dd3fc";
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([4, 3]);
+          for (const seg of exposedSegs) {
+            const a = { x: offsetX + seg.a.x * scale, y: offsetY + seg.a.y * scale };
+            const b = { x: offsetX + seg.b.x * scale, y: offsetY + seg.b.y * scale };
+            ctx.strokeStyle = condition.color;
+            ctx.lineWidth = isSelected ? 6 : 4;
+            ctx.lineCap = "round";
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
             ctx.stroke();
-            ctx.setLineDash([]);
+            ctx.lineCap = "butt";
+
+            if (isSelected) {
+              ctx.strokeStyle = "#7dd3fc";
+              ctx.lineWidth = 1.5;
+              ctx.setLineDash([4, 3]);
+              ctx.beginPath();
+              ctx.moveTo(a.x, a.y);
+              ctx.lineTo(b.x, b.y);
+              ctx.stroke();
+              ctx.setLineDash([]);
+            }
           }
         }
       }
@@ -629,21 +635,24 @@ export default function ThermalBridgesTab({ projectId }) {
     return null;
   };
 
-  // Finds the nearest selectable (non-shared) edge to a screen point, within tolerance.
+  // Finds the nearest selectable (non-shared) edge to a screen point, within
+  // tolerance. Hit-tests only the exposed sub-segments so clicks on shared
+  // (internal) portions of a partially-shared edge don't register.
   const edgeAtPoint = (screenPt) => {
     const { offsetX, offsetY, scale } = view;
     let best = null;
     let bestDist = EDGE_HIT_TOLERANCE_PX;
     for (const shape of shapes) {
       for (const side of SIDES) {
-        if (isEdgeShared(shapes, shape.id, side)) continue;
-        const seg = getEdgeSegment(shape, side);
-        const a = { x: offsetX + seg.a.x * scale, y: offsetY + seg.a.y * scale };
-        const b = { x: offsetX + seg.b.x * scale, y: offsetY + seg.b.y * scale };
-        const d = distToSegment({ x: screenPt.sx, y: screenPt.sy }, a, b);
-        if (d < bestDist) {
-          bestDist = d;
-          best = { shapeId: shape.id, side };
+        const exposedSegs = getExposedSegments(shapes, shape.id, side);
+        for (const seg of exposedSegs) {
+          const a = { x: offsetX + seg.a.x * scale, y: offsetY + seg.a.y * scale };
+          const b = { x: offsetX + seg.b.x * scale, y: offsetY + seg.b.y * scale };
+          const d = distToSegment({ x: screenPt.sx, y: screenPt.sy }, a, b);
+          if (d < bestDist) {
+            bestDist = d;
+            best = { shapeId: shape.id, side };
+          }
         }
       }
     }

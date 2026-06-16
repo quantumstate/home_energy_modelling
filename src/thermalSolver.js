@@ -5,7 +5,7 @@
 // cpp/thermal_solver.cpp. This module only wires up geometry conversion and
 // module loading so the UI can call into it once the numerics land.
 
-import { MATERIALS, CONDITIONS, isEdgeShared, edgeKey, DEFAULT_CONDITION_ID } from "./thermalBridgeGeometry.js";
+import { MATERIALS, CONDITIONS, getExposedSegments, edgeKey, DEFAULT_CONDITION_ID } from "./thermalBridgeGeometry.js";
 
 let modulePromise = null;
 
@@ -42,7 +42,7 @@ function shapesToEdgeConditions(shapes, edgeConditions) {
   const conditions = [];
   shapes.forEach((shape, layerIndex) => {
     for (const side of ["top", "right", "bottom", "left"]) {
-      if (isEdgeShared(shapes, shape.id, side)) continue;
+      if (getExposedSegments(shapes, shape.id, side).length === 0) continue;
       const conditionId = edgeConditions[edgeKey(shape.id, side)] || DEFAULT_CONDITION_ID;
       const temperature = CONDITIONS.find((c) => c.id === conditionId)?.temperature ?? 0;
       conditions.push({ layerIndex, side, type: conditionId, temperature });

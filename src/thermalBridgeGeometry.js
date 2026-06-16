@@ -73,6 +73,63 @@ export function isEdgeShared(shapes, shapeId, side) {
 
 export const edgeKey = (shapeId, side) => `${shapeId}:${side}`;
 
+// Removes the range [lo, hi] from an array of non-overlapping [lo, hi] intervals.
+function subtractInterval(intervals, lo, hi) {
+  const result = [];
+  for (const [a, b] of intervals) {
+    const overlapLo = Math.max(a, lo);
+    const overlapHi = Math.min(b, hi);
+    if (overlapHi <= overlapLo + EDGE_EPS) {
+      result.push([a, b]);
+    } else {
+      if (a < overlapLo - EDGE_EPS) result.push([a, overlapLo]);
+      if (overlapHi < b - EDGE_EPS) result.push([overlapHi, b]);
+    }
+  }
+  return result;
+}
+
+// Returns the sub-segments of an edge that are NOT collinearly shared with any
+// other shape. For a fully internal edge returns []. For a fully exposed edge
+// returns the full segment. For a partially-shared edge (e.g. the inner step
+// of an L-shape) returns only the exposed intervals as separate segments.
+export function getExposedSegments(shapes, shapeId, side) {
+  const shape = shapes.find((s) => s.id === shapeId);
+  if (!shape) return [];
+  const seg = getEdgeSegment(shape, side);
+  const horizontal = side === "top" || side === "bottom";
+
+  let intervals = horizontal
+    ? [[seg.a.x, seg.b.x]]
+    : [[seg.a.y, seg.b.y]];
+
+  for (const other of shapes) {
+    if (other.id === shapeId) continue;
+    for (const oside of SIDES) {
+      const oHorizontal = oside === "top" || oside === "bottom";
+      if (horizontal !== oHorizontal) continue;
+      const oseg = getEdgeSegment(other, oside);
+      if (horizontal) {
+        if (Math.abs(seg.a.y - oseg.a.y) < EDGE_EPS) {
+          intervals = subtractInterval(intervals, oseg.a.x, oseg.b.x);
+        }
+      } else {
+        if (Math.abs(seg.a.x - oseg.a.x) < EDGE_EPS) {
+          intervals = subtractInterval(intervals, oseg.a.y, oseg.b.y);
+        }
+      }
+    }
+  }
+
+  if (horizontal) {
+    const y = seg.a.y;
+    return intervals.map(([lo, hi]) => ({ a: { x: lo, y }, b: { x: hi, y } }));
+  } else {
+    const x = seg.a.x;
+    return intervals.map(([lo, hi]) => ({ a: { x, y: lo }, b: { x, y: hi } }));
+  }
+}
+
 export function distToSegment(pt, a, b) {
   const dx = b.x - a.x, dy = b.y - a.y;
   const len2 = dx * dx + dy * dy;
