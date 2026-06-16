@@ -415,6 +415,8 @@ export default function FloorPlanUI({ projectId }) {
       return { 0:{}, 1:{}, 2:{} };
     } catch { return { 0:{}, 1:{}, 2:{} }; }
   });
+  // Track wallsByStorey so we can seed area metadata during render instead of in an effect.
+  const [prevWallsForMeta, setPrevWallsForMeta] = useState(wallsByStorey);
 
   const [ceilingHeights, setCeilingHeights] = useState(() => {
     try { const s = localStorage.getItem(pk("floorplan_ceilings")); return s ? JSON.parse(s) : { 0:3.0, 1:2.7, 2:2.5 }; }
@@ -474,27 +476,26 @@ export default function FloorPlanUI({ projectId }) {
 
   // Lazily seed area metadata (name + palette) for newly-enclosed areas so
   // they keep a stable identity/colour even as other areas are added/removed.
-  useEffect(() => {
-    setAreaMetaByStorey(prev => {
-      let changed = false;
-      const next = { ...prev };
-      for (let s = 0; s < STOREY_LABELS.length; s++) {
-        const faces = findClosedAreas(wallsByStorey[s] || []);
-        const meta = { ...(next[s] || {}) };
-        for (const face of faces) {
-          const key = areaKey(face.wallIds);
-          if (!meta[key]) {
-            const pal = PALETTE[Object.keys(meta).length % PALETTE.length];
-            meta[key] = { name: `Room ${Object.keys(meta).length+1}`, ...pal };
-            changed = true;
-          }
+  // Done during render (not in an effect) to avoid cascading-render lint errors.
+  if (prevWallsForMeta !== wallsByStorey) {
+    setPrevWallsForMeta(wallsByStorey);
+    let changed = false;
+    const next = { ...areaMetaByStorey };
+    for (let s = 0; s < STOREY_LABELS.length; s++) {
+      const faces = findClosedAreas(wallsByStorey[s] || []);
+      const meta = { ...(next[s] || {}) };
+      for (const face of faces) {
+        const key = areaKey(face.wallIds);
+        if (!meta[key]) {
+          const pal = PALETTE[Object.keys(meta).length % PALETTE.length];
+          meta[key] = { name: `Room ${Object.keys(meta).length+1}`, ...pal };
+          changed = true;
         }
-        next[s] = meta;
       }
-      return changed ? next : prev;
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallsByStorey]);
+      next[s] = meta;
+    }
+    if (changed) setAreaMetaByStorey(next);
+  }
 
   // roomsByStorey shape, derived — kept for geometryProcessor / other views
   const roomsByStorey = useMemo(() => {
@@ -565,10 +566,16 @@ export default function FloorPlanUI({ projectId }) {
 
   // ── Persist ──
   const [savedAt, setSavedAt] = useState(null);
+  const [prevRoomsForSaved, setPrevRoomsForSaved] = useState(roomsByStorey);
+  // Update savedAt during render instead of inside an effect to avoid cascading-render warnings.
+  if (roomsByStorey !== prevRoomsForSaved) {
+    setPrevRoomsForSaved(roomsByStorey);
+    setSavedAt(new Date());
+  }
   useEffect(() => { try { localStorage.setItem(pk("floorplan_walls"), JSON.stringify(wallsByStorey)); } catch {} }, [wallsByStorey]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_openings"), JSON.stringify(openingsByStorey)); } catch {} }, [openingsByStorey]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_area_meta"), JSON.stringify(areaMetaByStorey)); } catch {} }, [areaMetaByStorey]);
-  useEffect(() => { try { localStorage.setItem(pk("floorplan_rooms"), JSON.stringify(roomsByStorey)); setSavedAt(new Date()); } catch {} }, [roomsByStorey]);
+  useEffect(() => { try { localStorage.setItem(pk("floorplan_rooms"), JSON.stringify(roomsByStorey)); } catch {} }, [roomsByStorey]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_ceilings"), JSON.stringify(ceilingHeights)); } catch {} }, [ceilingHeights]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_uvalues"),   JSON.stringify(globalU));           } catch {} }, [globalU]);
   useEffect(() => { try { localStorage.setItem(pk("floorplan_rotation"), JSON.stringify(buildingRotation));   } catch {} }, [buildingRotation]);
@@ -715,6 +722,17 @@ export default function FloorPlanUI({ projectId }) {
 
   // ── Replay ──
   const [showReplay, setShowReplay] = useState(false);
+
+  // ── SVG viewport size (kept in state so renderGrid doesn't read refs during render) ──
+  const [svgSize, setSvgSize] = useState({ w: 900, h: 600 });
+  useLayoutEffect(() => {
+    if (!svgRef.current) return;
+    const update = () => setSvgSize({ w: svgRef.current.clientWidth, h: svgRef.current.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(svgRef.current);
+    return () => ro.disconnect();
+  }, []);
 
   // ── Tool & drawing ──
   const [tool,      setTool]      = useState("wall");
@@ -1254,7 +1272,7 @@ export default function FloorPlanUI({ projectId }) {
 
   // ── Grid ──
   const renderGrid = () => {
-    const W = svgRef.current?.clientWidth||900, H = svgRef.current?.clientHeight||600;
+    const W = svgSize.w, H = svgSize.h;
     const s = zoom*PPM;
     const x0=Math.floor(-pan.x/s/GRID)*GRID-GRID, x1=Math.ceil((W-pan.x)/s/GRID)*GRID+GRID;
     const y0=Math.floor(-pan.y/s/GRID)*GRID-GRID, y1=Math.ceil((H-pan.y)/s/GRID)*GRID+GRID;
