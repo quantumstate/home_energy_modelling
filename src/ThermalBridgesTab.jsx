@@ -1393,10 +1393,13 @@ export default function ThermalBridgesTab({ projectId }) {
         <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
           <button
             type="button"
-            style={{ ...buttonStyle(false), width: "100%" }}
+            style={{ ...buttonStyle(false), width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}
             onClick={handleSolve}
             disabled={solveStatus === "running" || shapes.length === 0}
           >
+            {solveStatus === "running" && (
+              <span style={{ width: 12, height: 12, border: "2px solid rgba(255,255,255,0.3)", borderTopColor: "#fff", borderRadius: "50%", display: "inline-block", animation: "spin 0.7s linear infinite", flexShrink: 0 }} />
+            )}
             {solveStatus === "running" ? "Solving…" : "Run thermal solve"}
           </button>
           {solveStatus === "unavailable" && (
