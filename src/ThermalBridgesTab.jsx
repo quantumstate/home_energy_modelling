@@ -99,6 +99,39 @@ export default function ThermalBridgesTab({ projectId }) {
   const [meshColorMode, setMeshColorMode] = useState("material"); // "material" | "temperature" | "steadyState" | "groupId" | "distance"
 
   const dragRef = useRef(null); // generic drag state for pan / move / resize / draw
+  const importRef = useRef(null);
+
+  const handleExport = () => {
+    const data = JSON.stringify({ shapes, edgeConditions }, null, 2);
+    const blob = new Blob([data], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `thermal-bridge-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImport = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (Array.isArray(parsed.shapes)) {
+          setShapes(parsed.shapes);
+          setEdgeConditions(parsed.edgeConditions || {});
+          setSelectedId(null);
+          setSelectedEdge(null);
+        }
+      } catch {
+        // ignore malformed files
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
 
   const handleSolve = async () => {
     setSolveStatus("running");
@@ -1265,6 +1298,30 @@ export default function ThermalBridgesTab({ projectId }) {
               Mesh: {meshResult.cols} × {meshResult.rows} elements @ {meshResult.cellSizeMm}mm
             </div>
           )}
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              type="button"
+              style={{ ...buttonStyle(false), flex: 1 }}
+              onClick={handleExport}
+              disabled={shapes.length === 0}
+            >
+              Export
+            </button>
+            <button
+              type="button"
+              style={{ ...buttonStyle(false), flex: 1 }}
+              onClick={() => importRef.current?.click()}
+            >
+              Import
+            </button>
+            <input
+              ref={importRef}
+              type="file"
+              accept=".json"
+              style={{ display: "none" }}
+              onChange={handleImport}
+            />
+          </div>
           <div style={{ color: "#2d5a8a", fontFamily: "monospace", fontSize: 10, lineHeight: 1.6 }}>
             {shapes.length} layer{shapes.length === 1 ? "" : "s"} drawn
           </div>
