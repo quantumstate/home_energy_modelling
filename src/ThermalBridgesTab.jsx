@@ -190,7 +190,7 @@ export default function ThermalBridgesTab({ projectId }) {
           setMeshStatus("unavailable");
           return;
         }
-        setMeshResult(mesh);
+        setMeshResult({ ...mesh, builtForMode: meshColorMode });
         setMeshStatus("done");
       })
       .catch(() => {
@@ -366,7 +366,7 @@ export default function ThermalBridgesTab({ projectId }) {
     }
 
     // mesh debug overlay
-    if (showMesh && meshResult) {
+    if (showMesh && meshResult && meshResult.builtForMode === meshColorMode) {
       const { cols, rows, nodes, elements } = meshResult;
       const nodeCols = cols + 1;
       const nodeScreen = (n) => ({ x: offsetX + n.x * scale, y: offsetY + n.y * scale });
