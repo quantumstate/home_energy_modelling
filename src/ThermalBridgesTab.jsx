@@ -1066,7 +1066,7 @@ export default function ThermalBridgesTab({ projectId }) {
                   type="button"
                   onClick={() => {
                     setActiveConditionId(c.id);
-                    if (selectedEdge && !isEdgeShared(shapes, selectedEdge.shapeId, selectedEdge.side)) {
+                    if (selectedEdge && getExposedSegments(shapes, selectedEdge.shapeId, selectedEdge.side).length > 0) {
                       setEdgeConditions((current) => ({ ...current, [edgeKey(selectedEdge.shapeId, selectedEdge.side)]: c.id }));
                     }
                   }}
