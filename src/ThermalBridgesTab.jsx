@@ -21,15 +21,37 @@ const EDGE_HIT_TOLERANCE_PX = 6;
 
 const createId = () => `shape-${crypto.randomUUID()}`;
 
-function readStored(storageKey) {
+function readInitialState(storageKey) {
+  const defaultView = { offsetX: 80, offsetY: 80, scale: PX_PER_MM_DEFAULT };
+  const newBridge = (name = "Bridge 1") => ({
+    id: `bridge-${crypto.randomUUID()}`,
+    name,
+    shapes: [],
+    edgeConditions: {},
+  });
   try {
     const raw = localStorage.getItem(storageKey);
-    if (!raw) return null;
+    if (!raw) throw new Error();
     const parsed = JSON.parse(raw);
-    if (!parsed || !Array.isArray(parsed.shapes)) return null;
-    return parsed;
+    if (!parsed) throw new Error();
+    // New multi-bridge format
+    if (Array.isArray(parsed.bridges) && parsed.bridges.length > 0) {
+      const validId = parsed.bridges.find((b) => b.id === parsed.activeBridgeId)
+        ? parsed.activeBridgeId
+        : parsed.bridges[0].id;
+      return { bridges: parsed.bridges, activeBridgeId: validId, view: parsed.view || defaultView };
+    }
+    // Old single-bridge format — migrate transparently
+    if (Array.isArray(parsed.shapes)) {
+      const b = newBridge("Bridge 1");
+      b.shapes = parsed.shapes;
+      b.edgeConditions = parsed.edgeConditions || {};
+      return { bridges: [b], activeBridgeId: b.id, view: parsed.view || defaultView };
+    }
+    throw new Error();
   } catch {
-    return null;
+    const b = newBridge("Bridge 1");
+    return { bridges: [b], activeBridgeId: b.id, view: defaultView };
   }
 }
 
@@ -73,11 +95,31 @@ export default function ThermalBridgesTab({ projectId }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
 
-  const initial = readStored(storageKey);
-  const [shapes, setShapes] = useState(initial?.shapes || []);
-  const [view, setView] = useState(
-    initial?.view || { offsetX: 80, offsetY: 80, scale: PX_PER_MM_DEFAULT }
-  );
+  // Multi-bridge state — each bridge has its own shapes and edge conditions.
+  const _init = readInitialState(storageKey); // useState ignores this after mount
+  const [bridges, setBridges] = useState(_init.bridges);
+  const [activeBridgeId, setActiveBridgeId] = useState(_init.activeBridgeId);
+  const [view, setView] = useState(_init.view);
+
+  // Derive the active bridge's working data.
+  const activeBridge = bridges.find((b) => b.id === activeBridgeId) ?? bridges[0];
+  const shapes = activeBridge?.shapes ?? [];
+  const edgeConditions = activeBridge?.edgeConditions ?? {};
+
+  // Wrapper setters that write through to the active bridge in the bridges array.
+  const setShapes = useCallback((updater) => {
+    setBridges((prev) => prev.map((b) => {
+      if (b.id !== activeBridgeId) return b;
+      return { ...b, shapes: typeof updater === "function" ? updater(b.shapes) : updater };
+    }));
+  }, [activeBridgeId]);
+
+  const setEdgeConditions = useCallback((updater) => {
+    setBridges((prev) => prev.map((b) => {
+      if (b.id !== activeBridgeId) return b;
+      return { ...b, edgeConditions: typeof updater === "function" ? updater(b.edgeConditions) : updater };
+    }));
+  }, [activeBridgeId]);
 
   const [tool, setTool] = useState("rect"); // "rect" | "select"
   const [activeMaterialId, setActiveMaterialId] = useState(MATERIALS[0].id);
@@ -86,9 +128,10 @@ export default function ThermalBridgesTab({ projectId }) {
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [snapGuides, setSnapGuides] = useState({ x: [], y: [] }); // world mm positions
 
-  const [edgeConditions, setEdgeConditions] = useState(initial?.edgeConditions || {}); // edgeKey -> conditionId
   const [activeConditionId, setActiveConditionId] = useState(DEFAULT_CONDITION_ID);
   const [selectedEdge, setSelectedEdge] = useState(null); // { shapeId, side }
+  const [editingBridgeId, setEditingBridgeId] = useState(null);
+  const [editingBridgeName, setEditingBridgeName] = useState("");
 
   const [solveStatus, setSolveStatus] = useState("idle"); // "idle" | "running" | "done" | "unavailable" | "error"
   const [solveResult, setSolveResult] = useState(null);
@@ -100,6 +143,47 @@ export default function ThermalBridgesTab({ projectId }) {
 
   const dragRef = useRef(null); // generic drag state for pan / move / resize / draw
   const importRef = useRef(null);
+
+  // ─── Bridge management ────────────────────────────────────────────────────
+  const resetTransientState = () => {
+    setSelectedId(null);
+    setSelectedEdge(null);
+    setSolveStatus("idle");
+    setSolveResult(null);
+    setMeshResult(null);
+    setMeshStatus("idle");
+  };
+
+  const addBridge = () => {
+    const name = `Bridge ${bridges.length + 1}`;
+    const b = { id: `bridge-${crypto.randomUUID()}`, name, shapes: [], edgeConditions: {} };
+    setBridges((prev) => [...prev, b]);
+    setActiveBridgeId(b.id);
+    resetTransientState();
+  };
+
+  const switchBridge = (id) => {
+    if (id === activeBridgeId) return;
+    setActiveBridgeId(id);
+    resetTransientState();
+  };
+
+  const deleteBridge = (id) => {
+    if (bridges.length <= 1) return;
+    const idx = bridges.findIndex((b) => b.id === id);
+    const next = bridges.filter((b) => b.id !== id);
+    setBridges(next);
+    if (id === activeBridgeId) {
+      setActiveBridgeId(next[Math.min(idx, next.length - 1)].id);
+      resetTransientState();
+    }
+  };
+
+  const commitBridgeRename = () => {
+    const name = editingBridgeName.trim();
+    if (name) setBridges((prev) => prev.map((b) => b.id === editingBridgeId ? { ...b, name } : b));
+    setEditingBridgeId(null);
+  };
 
   const handleExport = () => {
     const data = JSON.stringify({ shapes, edgeConditions }, null, 2);
@@ -120,10 +204,11 @@ export default function ThermalBridgesTab({ projectId }) {
       try {
         const parsed = JSON.parse(ev.target.result);
         if (Array.isArray(parsed.shapes)) {
-          setShapes(parsed.shapes);
-          setEdgeConditions(parsed.edgeConditions || {});
-          setSelectedId(null);
-          setSelectedEdge(null);
+          const name = parsed.name || `Imported ${bridges.length + 1}`;
+          const b = { id: `bridge-${crypto.randomUUID()}`, name, shapes: parsed.shapes, edgeConditions: parsed.edgeConditions || {} };
+          setBridges((prev) => [...prev, b]);
+          setActiveBridgeId(b.id);
+          resetTransientState();
         }
       } catch {
         // ignore malformed files
@@ -153,11 +238,11 @@ export default function ThermalBridgesTab({ projectId }) {
   // ─── Persist ──────────────────────────────────────────────────────────────
   useEffect(() => {
     try {
-      localStorage.setItem(storageKey, JSON.stringify({ shapes, view, edgeConditions }));
+      localStorage.setItem(storageKey, JSON.stringify({ bridges, activeBridgeId, view }));
     } catch {
       // best effort
     }
-  }, [shapes, view, edgeConditions, storageKey]);
+  }, [bridges, activeBridgeId, view, storageKey]);
 
   // ─── Mesh debug view ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -1087,6 +1172,66 @@ export default function ThermalBridgesTab({ projectId }) {
           gap: 14,
         }}
       >
+        {/* Bridge switcher */}
+        <div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+            <div style={{ color: "#4a7aaa", fontFamily: "monospace", fontSize: 11, letterSpacing: "0.07em", textTransform: "uppercase" }}>
+              Bridges
+            </div>
+            <button type="button" style={{ ...buttonStyle(false), padding: "2px 8px", fontSize: 14 }} onClick={addBridge} title="Add bridge">
+              +
+            </button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+            {bridges.map((bridge) => {
+              const isActive = bridge.id === activeBridgeId;
+              const isEditing = editingBridgeId === bridge.id;
+              return (
+                <div
+                  key={bridge.id}
+                  style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 6px", background: isActive ? "#1e4a7a" : "#0a1628", border: `1px solid ${isActive ? "#2563eb" : "#1e3a6b"}`, borderRadius: 4, cursor: "pointer" }}
+                  onClick={() => switchBridge(bridge.id)}
+                >
+                  {isEditing ? (
+                    <input
+                      autoFocus
+                      type="text"
+                      value={editingBridgeName}
+                      style={{ ...fieldStyle, padding: "1px 4px", flex: 1, fontSize: 11 }}
+                      onChange={(e) => setEditingBridgeName(e.target.value)}
+                      onBlur={commitBridgeRename}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitBridgeRename();
+                        if (e.key === "Escape") setEditingBridgeId(null);
+                        e.stopPropagation();
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  ) : (
+                    <span
+                      style={{ flex: 1, color: isActive ? "#7dd3fc" : "#4a7fa5", fontFamily: "monospace", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      onDoubleClick={(e) => { e.stopPropagation(); setEditingBridgeId(bridge.id); setEditingBridgeName(bridge.name); }}
+                      title="Double-click to rename"
+                    >
+                      {bridge.name}
+                    </span>
+                  )}
+                  {bridges.length > 1 && !isEditing && (
+                    <button
+                      type="button"
+                      style={{ background: "none", border: "none", color: "#4a7fa5", cursor: "pointer", padding: "0 2px", fontSize: 14, lineHeight: 1, flexShrink: 0 }}
+                      onClick={(e) => { e.stopPropagation(); deleteBridge(bridge.id); }}
+                      title="Delete bridge"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
         {tool === "boundary" && (
           <div>
             <div style={{ color: "#4a7aaa", fontFamily: "monospace", fontSize: 11, letterSpacing: "0.07em", marginBottom: 8, textTransform: "uppercase" }}>
