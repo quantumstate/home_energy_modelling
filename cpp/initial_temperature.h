@@ -40,6 +40,37 @@ inline bool isBoundaryNode(const Mesh& mesh, int i, int j) {
   return hasMaterial && hasVoid;
 }
 
+// Returns true if node (i,j) has a boundary edge on the specified side of the
+// domain — i.e. the void is in the correct direction for the given edge
+// condition. This is stricter than isBoundaryNode: a corner node where two
+// sides meet is only counted for the side whose void is actually adjacent.
+//
+// "top"   : at least one horizontal edge at this node has void above, material below.
+// "bottom": at least one horizontal edge at this node has material above, void below.
+// "left"  : at least one vertical edge at this node has void to the left, material to the right.
+// "right" : at least one vertical edge at this node has material to the left, void to the right.
+inline bool isNodeOnSide(const Mesh& mesh, int i, int j, const std::string& side) {
+  if (side == "top") {
+    // Horizontal edges touching this node: check element above (j-1 row) vs below (j row).
+    bool leftEdge  = (i > 0)          && (elementLambda(mesh, i-1, j-1) <= 0) && (elementLambda(mesh, i-1, j) > 0);
+    bool rightEdge = (i < mesh.cols)  && (elementLambda(mesh, i,   j-1) <= 0) && (elementLambda(mesh, i,   j) > 0);
+    return leftEdge || rightEdge;
+  } else if (side == "bottom") {
+    bool leftEdge  = (i > 0)          && (elementLambda(mesh, i-1, j-1) > 0) && (elementLambda(mesh, i-1, j) <= 0);
+    bool rightEdge = (i < mesh.cols)  && (elementLambda(mesh, i,   j-1) > 0) && (elementLambda(mesh, i,   j) <= 0);
+    return leftEdge || rightEdge;
+  } else if (side == "left") {
+    // Vertical edges touching this node: check element to the left (i-1 col) vs right (i col).
+    bool topEdge    = (j > 0)          && (elementLambda(mesh, i-1, j-1) <= 0) && (elementLambda(mesh, i, j-1) > 0);
+    bool bottomEdge = (j < mesh.rows)  && (elementLambda(mesh, i-1, j)   <= 0) && (elementLambda(mesh, i, j)   > 0);
+    return topEdge || bottomEdge;
+  } else { // "right"
+    bool topEdge    = (j > 0)          && (elementLambda(mesh, i-1, j-1) > 0) && (elementLambda(mesh, i, j-1) <= 0);
+    bool bottomEdge = (j < mesh.rows)  && (elementLambda(mesh, i-1, j)   > 0) && (elementLambda(mesh, i, j)   <= 0);
+    return topEdge || bottomEdge;
+  }
+}
+
 // True if the horizontal edge between nodes (i,j) and (i+1,j) separates
 // material from void (i.e. it's on the domain boundary).
 inline bool isHorizontalBoundaryEdge(const Mesh& mesh, int i, int j) {
@@ -166,7 +197,7 @@ inline BoundaryInfo classifyBoundaryNodes(const Mesh& mesh,
         double cross = horizontal ? node.y : node.x;
         if (std::abs(cross - fixed) > kEps) continue;
         if (along < lo - kEps || along > hi + kEps) continue;
-        if (!isBoundaryNode(mesh, i, j)) continue;
+        if (!isNodeOnSide(mesh, i, j, cond.side)) continue;
         sumT[idx] += cond.temperature;
         countT[idx] += 1;
       }
