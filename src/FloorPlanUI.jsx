@@ -5,6 +5,7 @@ import { recorder } from "./sessionRecorder.js";
 import ReplayPanel from "./ReplayPanel.jsx";
 import { offsetPolygon, computeRoofLines } from "./roofGeometry.js";
 import { findClosedAreas, hasClosedBoundary } from "./wallGraph.js";
+import { UK_WALL_PRESETS } from "./wallPresets.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PPM  = 60;
@@ -266,6 +267,84 @@ function Section({ label, open, onToggle, children, accent }) {
         <span style={{ fontSize: 8 }}>{open ? "▴" : "▾"}</span>
       </button>
       {open && <div style={{ paddingTop: 8 }}>{children}</div>}
+    </div>
+  );
+}
+
+// U-value from layers (no surface resistances — matches UValueCalculator output)
+function calcLayerUValue(layers) {
+  const r = (layers || []).reduce((sum, l) => {
+    const t = +l.thicknessMm, lam = +l.lambda;
+    return (Number.isFinite(t) && Number.isFinite(lam) && t > 0 && lam > 0)
+      ? sum + t / 1000 / lam
+      : sum;
+  }, 0);
+  return r > 0 ? 1 / r : 0;
+}
+
+function WallPresetPicker({ projectId, onApply }) {
+  const [openEra, setOpenEra] = useState(null);
+  const toggle = (id) => setOpenEra(prev => prev === id ? null : id);
+
+  const customWalls = (() => {
+    try {
+      const s = localStorage.getItem(`${projectId}_uvalue_building_elements`);
+      return (JSON.parse(s) || []).filter(e => e.type === "wall");
+    } catch { return []; }
+  })();
+
+  const rowBtn = (name, description, uVal, key) => (
+    <button key={key} onClick={() => onApply(parseFloat(uVal.toFixed(3)))}
+      title={description}
+      style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
+        width:"100%", padding:"5px 7px", marginBottom:2,
+        background:"#070d1a", border:"1px solid #132040", borderRadius:3,
+        cursor:"pointer", fontFamily:"monospace", textAlign:"left" }}>
+      <span style={{ fontSize:9, color:"#c8d8f0", flex:1, paddingRight:6, lineHeight:1.3 }}>{name}</span>
+      <span style={{ fontSize:10, color:"#60a5fa", flexShrink:0 }}>{uVal.toFixed(2)}</span>
+      <span style={{ fontSize:7, color:"#1a3050", marginLeft:3, flexShrink:0 }}>W/m²K</span>
+    </button>
+  );
+
+  const eraHeader = (id, label, subtitle, accent = "#4a7fa5") => (
+    <button onClick={() => toggle(id)}
+      style={{ width:"100%", display:"flex", justifyContent:"space-between", alignItems:"center",
+        padding:"4px 7px", marginBottom:2, background:"#050d1a",
+        border:`1px solid ${openEra === id ? accent + "60" : "#132040"}`,
+        borderRadius:3, cursor:"pointer", fontFamily:"monospace" }}>
+      <span style={{ fontSize:9, color: accent, fontWeight:"bold", letterSpacing:"0.05em" }}>{label}</span>
+      <span style={{ display:"flex", alignItems:"center", gap:5 }}>
+        <span style={{ fontSize:7, color:"#1a3050" }}>{subtitle}</span>
+        <span style={{ fontSize:7, color: openEra === id ? accent : "#1e3a6b" }}>{openEra === id ? "▴" : "▾"}</span>
+      </span>
+    </button>
+  );
+
+  return (
+    <div style={{ fontSize:9 }}>
+      {UK_WALL_PRESETS.map(group => (
+        <div key={group.id}>
+          {eraHeader(group.id, group.era, group.subtitle)}
+          {openEra === group.id && (
+            <div style={{ paddingLeft:4, paddingBottom:4 }}>
+              {group.presets.map(p => rowBtn(p.name, p.description, p.uValue, p.id))}
+            </div>
+          )}
+        </div>
+      ))}
+      <div>
+        {eraHeader("custom", "Custom", "U-value calculator", "#a78bfa")}
+        {openEra === "custom" && (
+          <div style={{ paddingLeft:4, paddingBottom:4 }}>
+            {customWalls.length === 0
+              ? <div style={{ color:"#1a3050", fontSize:8, padding:"6px 4px", fontFamily:"monospace", lineHeight:1.5 }}>
+                  No wall build-ups found.<br/>Add them in the U-value calculator tab.
+                </div>
+              : customWalls.map(el => rowBtn(el.name, el.name, calcLayerUValue(el.layers), el.id))
+            }
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -786,9 +865,10 @@ export default function FloorPlanUI({ projectId }) {
   const [wallHover,       setWallHover]       = useState(null);
 
   // ── Panel sections open/closed ──
-  const [secU,    setSecU]    = useState(true);  // U-values in panel
-  const [secWall, setSecWall] = useState(false); // Wall list in area panel
-  const [secDef,  setSecDef]  = useState(false); // Global defaults always-on at panel bottom
+  const [secU,      setSecU]      = useState(true);  // U-values in panel
+  const [secPreset, setSecPreset] = useState(false); // Construction preset library
+  const [secWall,   setSecWall]   = useState(false); // Wall list in area panel
+  const [secDef,    setSecDef]    = useState(false); // Global defaults always-on at panel bottom
 
   // ── Pointer ──
   const panState   = useRef({ active: false, origin: null, startPan: null });
@@ -1593,6 +1673,10 @@ export default function FloorPlanUI({ projectId }) {
               Shared by any room(s) bordering this wall.<br/>
               Effective: <span style={{color:"#7dd3fc"}}>{effU(selectedWall.uValue,globalU.wall).toFixed(2)}</span> W/m²K
             </div>
+          </Section>
+
+          <Section label="CONSTRUCTION LIBRARY" open={secPreset} onToggle={()=>setSecPreset(v=>!v)} accent="#a78bfa">
+            <WallPresetPicker projectId={projectId} onApply={v=>updateWallU(selectedWall.id, v)}/>
           </Section>
 
           <button onClick={()=>{
