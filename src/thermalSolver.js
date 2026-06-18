@@ -44,8 +44,10 @@ function shapesToEdgeConditions(shapes, edgeConditions) {
     for (const side of ["top", "right", "bottom", "left"]) {
       if (getExposedSegments(shapes, shape.id, side).length === 0) continue;
       const conditionId = edgeConditions[edgeKey(shape.id, side)] || DEFAULT_CONDITION_ID;
-      const temperature = CONDITIONS.find((c) => c.id === conditionId)?.temperature ?? 0;
-      conditions.push({ layerIndex, side, type: conditionId, temperature });
+      // psi-reference is thermally adiabatic — the C++ solver only recognises "adiabatic"
+      const solverType = conditionId === "psi-reference" ? "adiabatic" : conditionId;
+      const temperature = CONDITIONS.find((c) => c.id === solverType)?.temperature ?? 0;
+      conditions.push({ layerIndex, side, type: solverType, temperature });
     }
   });
   return conditions;

@@ -23,6 +23,7 @@ export const CONDITIONS = [
   { id: "inside", name: "Inside", temperature: 21, color: "#f97316" },
   { id: "outside", name: "Outside", temperature: -2, color: "#38bdf8" },
   { id: "adiabatic", name: "Adiabatic", temperature: null, color: "#6b7280" },
+  { id: "psi-reference", name: "Ψ reference", temperature: null, color: "#a78bfa" },
 ];
 export const DEFAULT_CONDITION_ID = "adiabatic";
 
@@ -127,6 +128,121 @@ export function getExposedSegments(shapes, shapeId, side) {
   } else {
     const x = seg.a.x;
     return intervals.map(([lo, hi]) => ({ a: { x, y: lo }, b: { x, y: hi } }));
+  }
+}
+
+// Computes the linear thermal transmittance (Ψ, W/(m·K)) for the modelled
+// junction. For each exposed adiabatic edge the 1D U-value is computed by
+// tracing the material layers in series from the outside face to the inside
+// face at that cut-plane; the reference length b is the flanking element's
+// extent perpendicular to the heat-flow direction.
+//
+// Returns two values — one derived from the inside boundary heat flux, one
+// from the outside — which should converge to the same figure in a well-
+// solved model (energy conservation). Any difference indicates residual
+// solver error and acts as a built-in sanity check.
+export function computePsi(shapes, edgeConditions, solveResult) {
+  const { insideU, insideLengthM, outsideU, outsideLengthM } = solveResult;
+  const l2dInside  = insideU  * insideLengthM;
+  const l2dOutside = outsideU * outsideLengthM;
+
+  // Group psi-reference edges by their geometric line (same orientation + position).
+  // Adjacent shapes on the same reference line must produce ONE component, not N,
+  // because _u1dAtAdiabatic already collects all shapes at that position.
+  const lineGroups = []; // [{ isH, pos, shapes: [{shape, side}] }]
+  for (const shape of shapes) {
+    for (const side of SIDES) {
+      if (getExposedSegments(shapes, shape.id, side).length === 0) continue;
+      const condId = edgeConditions[edgeKey(shape.id, side)] ?? DEFAULT_CONDITION_ID;
+      if (condId !== "psi-reference") continue;
+
+      const isH = side === "top" || side === "bottom";
+      const pos = isH
+        ? (side === "top" ? shape.y : shape.y + shape.h)
+        : (side === "right" ? shape.x + shape.w : shape.x);
+
+      const existing = lineGroups.find((g) => g.isH === isH && Math.abs(g.pos - pos) < EDGE_EPS);
+      if (existing) {
+        existing.shapes.push({ shape, side });
+      } else {
+        lineGroups.push({ isH, pos, shapes: [{ shape, side }] });
+      }
+    }
+  }
+
+  const components = [];
+  for (const { isH, shapes: group } of lineGroups) {
+    const { shape, side } = group[0];
+    const { u1d } = _u1dAtAdiabatic(shapes, shape, side);
+    // For merged groups take the largest b — the shape with the greatest
+    // perpendicular extent defines the element boundary length.
+    const bMm = Math.max(...group.map(({ shape: s }) => isH ? s.h : s.w));
+    const b = bMm / 1000;
+    const matNames = [...new Set(group.map(({ shape: s }) =>
+      MATERIALS.find((m) => m.id === s.materialId)?.name ?? s.materialId
+    ))];
+    components.push({
+      shapeId: shape.id,
+      side,
+      materialName: matNames.join(" + "),
+      u1d,
+      b,
+      contribution: u1d * b,
+    });
+  }
+
+  const ref = components.reduce((s, c) => s + c.contribution, 0);
+  return {
+    psiInside:      l2dInside  - ref,
+    psiOutside:     l2dOutside - ref,
+    l2dInside,
+    l2dOutside,
+    referenceTotal: ref,
+    components,
+  };
+}
+
+// Computes the 1D U-value (W/m²K) at a given adiabatic edge and the
+// perpendicular span b (mm) of that flanking element.
+function _u1dAtAdiabatic(shapes, shape, side) {
+  const horizontal = side === "top" || side === "bottom";
+
+  if (horizontal) {
+    // Heat flows left→right (x-direction). Cross-section is at this y.
+    // Filter is directional: "top" collects shapes from below that reach y;
+    // "bottom" collects shapes from above that start at y. This avoids
+    // accidentally including shapes on the other side of a shared boundary
+    // (e.g. a concrete slab whose bottom coincides with a brick wall's top).
+    // "top" = shape.y (visual top, matching getEdgeSegment convention)
+    // "bottom" = shape.y + shape.h (visual bottom)
+    const y = side === "top" ? shape.y : shape.y + shape.h;
+    const column = shapes
+      .filter((s) =>
+        side === "top"
+          ? s.y < y + EDGE_EPS && s.y + s.h > y + EDGE_EPS   // shapes starting at top, going down
+          : s.y < y - EDGE_EPS && s.y + s.h > y - EDGE_EPS   // shapes from above reaching bottom
+      )
+      .sort((a, b) => a.x - b.x);
+    const rTot = column.reduce((r, s) => {
+      const lam = MATERIALS.find((m) => m.id === s.materialId)?.lambda ?? 1;
+      return r + (s.w / 1000) / lam;
+    }, 0);
+    return { u1d: rTot > 0 ? 1 / rTot : 0, bMm: shape.h };
+  } else {
+    // Heat flows top→bottom (y-direction). Cross-section is at this x.
+    const x = side === "right" ? shape.x + shape.w : shape.x;
+    const row = shapes
+      .filter((s) =>
+        side === "right"
+          ? s.x < x - EDGE_EPS && s.x + s.w > x - EDGE_EPS
+          : s.x < x + EDGE_EPS && s.x + s.w > x + EDGE_EPS
+      )
+      .sort((a, b) => a.y - b.y);
+    const rTot = row.reduce((r, s) => {
+      const lam = MATERIALS.find((m) => m.id === s.materialId)?.lambda ?? 1;
+      return r + (s.h / 1000) / lam;
+    }, 0);
+    return { u1d: rTot > 0 ? 1 / rTot : 0, bMm: shape.w };
   }
 }
 

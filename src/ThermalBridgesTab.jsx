@@ -9,6 +9,7 @@ import {
   getExposedSegments,
   edgeKey,
   distToSegment,
+  computePsi,
 } from "./thermalBridgeGeometry.js";
 
 const STORAGE_KEY = "thermal_bridges_model";
@@ -685,10 +686,12 @@ export default function ThermalBridgesTab({ projectId }) {
             ctx.strokeStyle = condition.color;
             ctx.lineWidth = isSelected ? 6 : 4;
             ctx.lineCap = "round";
+            if (conditionId === "psi-reference") ctx.setLineDash([10, 5]);
             ctx.beginPath();
             ctx.moveTo(a.x, a.y);
             ctx.lineTo(b.x, b.y);
             ctx.stroke();
+            ctx.setLineDash([]);
             ctx.lineCap = "butt";
 
             if (isSelected) {
@@ -1429,6 +1432,41 @@ export default function ThermalBridgesTab({ projectId }) {
                   Outside boundary: U = {solveResult.outsideU.toFixed(3)} W/m²K ({solveResult.outsideLengthM.toFixed(3)} m)
                 </>
               )}
+              {(() => {
+                const psi = computePsi(shapes, edgeConditions, solveResult);
+                if (psi.components.length === 0) return (
+                  <>
+                    <br />
+                    <span style={{ color: "#818cf8", fontSize: 9 }}>
+                      Mark edges as Ψ reference to calculate Ψ.
+                    </span>
+                  </>
+                );
+                return (
+                  <>
+                    <br />
+                    <span style={{ color: "#a78bfa" }}>
+                      ─── Ψ reference lines ───
+                      {psi.components.map((c, i) => (
+                        <span key={i}>
+                          <br />
+                          {c.materialName} / {c.side}: U = {c.u1d.toFixed(3)} W/m²K
+                        </span>
+                      ))}
+                      <br />
+                      ─── Ψ (linear thermal transmittance) ───
+                      <br />
+                      Ψ (inside)&nbsp;&nbsp;= {psi.psiInside.toFixed(4)} W/(m·K)
+                      <br />
+                      Ψ (outside) = {psi.psiOutside.toFixed(4)} W/(m·K)
+                      <br />
+                      <span style={{ color: "#818cf8", fontSize: 9 }}>
+                        L²D inside={psi.l2dInside.toFixed(4)} outside={psi.l2dOutside.toFixed(4)} ref={psi.referenceTotal.toFixed(4)} W/(m·K)
+                      </span>
+                    </span>
+                  </>
+                );
+              })()}
             </div>
           )}
           {showMesh && meshStatus === "unavailable" && (
