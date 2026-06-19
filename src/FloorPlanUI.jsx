@@ -282,8 +282,10 @@ function calcLayerUValue(layers) {
   return r > 0 ? 1 / r : 0;
 }
 
-function WallPresetPicker({ projectId, onApply }) {
+function WallPresetPicker({ projectId, onApply, onNavigate }) {
   const [openEra, setOpenEra] = useState(null);
+  // { type: "preset", preset } | { type: "custom", elementId } | null
+  const [selected, setSelected] = useState(null);
   const toggle = (id) => setOpenEra(prev => prev === id ? null : id);
 
   const customWalls = (() => {
@@ -293,15 +295,59 @@ function WallPresetPicker({ projectId, onApply }) {
     } catch { return []; }
   })();
 
-  const rowBtn = (name, description, uVal, key) => (
-    <button key={key} onClick={() => onApply(parseFloat(uVal.toFixed(3)))}
+  const applyPreset = (preset) => {
+    onApply(parseFloat(preset.uValue.toFixed(3)));
+    setSelected({ type: "preset", preset });
+  };
+
+  const applyCustom = (el) => {
+    const u = calcLayerUValue(el.layers);
+    onApply(parseFloat(u.toFixed(3)));
+    setSelected({ type: "custom", elementId: el.id });
+  };
+
+  const handleEditInCalculator = () => {
+    if (!selected || !onNavigate) return;
+    if (selected.type === "custom") {
+      onNavigate("u-value-calculator");
+      return;
+    }
+    // Create a new wall element from the preset layers and prepend it so the
+    // calculator opens on it (it picks initialElements[0] as active).
+    const preset = selected.preset;
+    const layers = (preset.layers || []).map(l => ({
+      id: `layer-${crypto.randomUUID()}`,
+      name: l.name,
+      thicknessMm: l.thicknessMm,
+      lambda: l.lambda,
+    }));
+    const element = {
+      id: `element-${crypto.randomUUID()}`,
+      type: "wall",
+      name: preset.name,
+      layers,
+    };
+    try {
+      const key = `${projectId}_uvalue_building_elements`;
+      const existing = JSON.parse(localStorage.getItem(key) || "[]");
+      localStorage.setItem(key, JSON.stringify([element, ...existing]));
+    } catch { /* storage best-effort */ }
+    onNavigate("u-value-calculator");
+  };
+
+  const isSelectedPreset = (id) => selected?.type === "preset" && selected.preset.id === id;
+  const isSelectedCustom = (id) => selected?.type === "custom" && selected.elementId === id;
+
+  const rowBtn = (name, description, uVal, key, isActive, onRowClick) => (
+    <button key={key} onClick={onRowClick}
       title={description}
       style={{ display:"flex", justifyContent:"space-between", alignItems:"center",
         width:"100%", padding:"5px 7px", marginBottom:2,
-        background:"#070d1a", border:"1px solid #132040", borderRadius:3,
+        background: isActive ? "#0d2040" : "#070d1a",
+        border:`1px solid ${isActive ? "#3b6ea5" : "#132040"}`, borderRadius:3,
         cursor:"pointer", fontFamily:"monospace", textAlign:"left" }}>
-      <span style={{ fontSize:9, color:"#c8d8f0", flex:1, paddingRight:6, lineHeight:1.3 }}>{name}</span>
-      <span style={{ fontSize:10, color:"#60a5fa", flexShrink:0 }}>{uVal.toFixed(2)}</span>
+      <span style={{ fontSize:9, color: isActive ? "#7dd3fc" : "#c8d8f0", flex:1, paddingRight:6, lineHeight:1.3 }}>{name}</span>
+      <span style={{ fontSize:10, color: isActive ? "#7dd3fc" : "#60a5fa", flexShrink:0 }}>{uVal.toFixed(2)}</span>
       <span style={{ fontSize:7, color:"#1a3050", marginLeft:3, flexShrink:0 }}>W/m²K</span>
     </button>
   );
@@ -327,7 +373,11 @@ function WallPresetPicker({ projectId, onApply }) {
           {eraHeader(group.id, group.era, group.subtitle)}
           {openEra === group.id && (
             <div style={{ paddingLeft:4, paddingBottom:4 }}>
-              {group.presets.map(p => rowBtn(p.name, p.description, p.uValue, p.id))}
+              {group.presets.map(p => rowBtn(
+                p.name, p.description, p.uValue, p.id,
+                isSelectedPreset(p.id),
+                () => applyPreset(p)
+              ))}
             </div>
           )}
         </div>
@@ -340,11 +390,25 @@ function WallPresetPicker({ projectId, onApply }) {
               ? <div style={{ color:"#1a3050", fontSize:8, padding:"6px 4px", fontFamily:"monospace", lineHeight:1.5 }}>
                   No wall build-ups found.<br/>Add them in the U-value calculator tab.
                 </div>
-              : customWalls.map(el => rowBtn(el.name, el.name, calcLayerUValue(el.layers), el.id))
+              : customWalls.map(el => rowBtn(
+                  el.name, el.name, calcLayerUValue(el.layers), el.id,
+                  isSelectedCustom(el.id),
+                  () => applyCustom(el)
+                ))
             }
           </div>
         )}
       </div>
+      {selected && onNavigate && (
+        <button onClick={handleEditInCalculator}
+          style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:5,
+            width:"100%", marginTop:8, padding:"6px 8px",
+            background:"#070d1a", border:"1px solid #a78bfa60",
+            borderRadius:3, cursor:"pointer", fontFamily:"monospace",
+            color:"#a78bfa", fontSize:9, letterSpacing:"0.05em" }}>
+          {selected.type === "custom" ? "→ Open in U-value Calculator" : "→ Edit as new build-up in Calculator"}
+        </button>
+      )}
     </div>
   );
 }
@@ -480,7 +544,7 @@ function NorthOverlay({ rotation }) {
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
-export default function FloorPlanUI({ projectId }) {
+export default function FloorPlanUI({ projectId, onNavigate }) {
   const pk = (key) => `${projectId}_${key}`;
   const svgRef = useRef(null);
 
@@ -1676,7 +1740,7 @@ export default function FloorPlanUI({ projectId }) {
           </Section>
 
           <Section label="CONSTRUCTION LIBRARY" open={secPreset} onToggle={()=>setSecPreset(v=>!v)} accent="#a78bfa">
-            <WallPresetPicker projectId={projectId} onApply={v=>updateWallU(selectedWall.id, v)}/>
+            <WallPresetPicker projectId={projectId} onApply={v=>updateWallU(selectedWall.id, v)} onNavigate={onNavigate}/>
           </Section>
 
           <button onClick={()=>{

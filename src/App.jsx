@@ -121,7 +121,7 @@ function App() {
       </nav>
 
       <main style={{ flex: 1, display: "flex", minHeight: 0 }}>
-        {activeTab === "floor-plan" && <FloorPlanUI projectId={currentProject.id} />}
+        {activeTab === "floor-plan" && <FloorPlanUI projectId={currentProject.id} onNavigate={setActiveTab} />}
         {activeTab === "3d-view" && <ThreeDView projectId={currentProject.id} />}
         {activeTab === "u-value-calculator" && <UValueCalculator projectId={currentProject.id} />}
         {activeTab === "heat-summary" && <HeatSummary projectId={currentProject.id} />}
