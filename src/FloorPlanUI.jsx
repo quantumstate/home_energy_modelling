@@ -271,7 +271,10 @@ function Section({ label, open, onToggle, children, accent }) {
   );
 }
 
-// U-value from layers (no surface resistances — matches UValueCalculator output)
+// U-value from layers including surface resistances (BS EN ISO 6946).
+// Custom elements in the construction library are always wall type.
+const WALL_SURFACE_R = 0.13 + 0.04; // Rsi + Rse for horizontal heat flow
+
 function calcLayerUValue(layers) {
   const r = (layers || []).reduce((sum, l) => {
     const t = +l.thicknessMm, lam = +l.lambda;
@@ -279,7 +282,8 @@ function calcLayerUValue(layers) {
       ? sum + t / 1000 / lam
       : sum;
   }, 0);
-  return r > 0 ? 1 / r : 0;
+  const totalR = r + WALL_SURFACE_R;
+  return totalR > 0 ? 1 / totalR : 0;
 }
 
 function WallPresetPicker({ projectId, onApply, onNavigate }) {

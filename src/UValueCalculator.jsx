@@ -22,6 +22,14 @@ const PRESETS = [
   { id: "render", name: "Render", thicknessMm: 20, lambda: 0.7 },
 ];
 
+// Surface resistances per BS EN ISO 6946:2017 (m²K/W).
+// Heat flow direction determines Rsi: horizontal → wall, upward → roof, downward → floor.
+const SURFACE_RESISTANCES = {
+  wall:  { rsi: 0.13, rse: 0.04 }, // horizontal heat flow
+  roof:  { rsi: 0.10, rse: 0.04 }, // upward heat flow
+  floor: { rsi: 0.17, rse: 0.04 }, // downward heat flow
+};
+
 const fieldStyle = {
   width: "100%",
   boxSizing: "border-box",
@@ -127,12 +135,11 @@ export default function UValueCalculator({ projectId }) {
   const layers = activeElement?.layers || [];
 
   const totals = useMemo(() => {
-    const totalR = layers.reduce((sum, layer) => sum + layerRValue(layer), 0);
-    return {
-      totalR,
-      uValue: totalR > 0 ? 1 / totalR : 0,
-    };
-  }, [layers]);
+    const { rsi, rse } = SURFACE_RESISTANCES[activeElement?.type] || SURFACE_RESISTANCES.wall;
+    const layersR = layers.reduce((sum, layer) => sum + layerRValue(layer), 0);
+    const totalR = rse + layersR + rsi;
+    return { rsi, rse, layersR, totalR, uValue: totalR > 0 ? 1 / totalR : 0 };
+  }, [layers, activeElement?.type]);
 
   useEffect(() => {
     try {
@@ -261,6 +268,19 @@ export default function UValueCalculator({ projectId }) {
     />
   );
 
+  const gridCols = "42px minmax(180px, 1.5fr) minmax(120px, 0.8fr) minmax(120px, 0.8fr) minmax(95px, 0.6fr) 132px";
+  const skinRow = (label, side, rValue, accent) => (
+    <div style={{ display:"grid", gridTemplateColumns: gridCols, gap:8, alignItems:"center",
+      background:"#040810", border:"1px dashed #0d1a2e", borderRadius:6, padding:8, marginBottom:2 }}>
+      <div style={{ color: accent, fontSize:9, letterSpacing:"0.08em", textTransform:"uppercase" }}>{side}</div>
+      <div style={{ color:"#2d5a8a", fontSize:11 }}>{label}</div>
+      <div style={{ color:"#1a3050", fontSize:10 }}>—</div>
+      <div style={{ color:"#1a3050", fontSize:10 }}>—</div>
+      <div style={{ color:"#4a7fa5", fontSize:13, fontWeight:700 }}>{formatNumber(rValue)}</div>
+      <div />
+    </div>
+  );
+
   return (
     <section
       style={{
@@ -308,7 +328,8 @@ export default function UValueCalculator({ projectId }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {elements.map((element) => {
                 const isActive = element.id === activeElement.id;
-                const totalR = element.layers.reduce((sum, layer) => sum + layerRValue(layer), 0);
+                const { rsi, rse } = SURFACE_RESISTANCES[element.type] || SURFACE_RESISTANCES.wall;
+                const totalR = element.layers.reduce((sum, layer) => sum + layerRValue(layer), 0) + rsi + rse;
                 const uValue = totalR > 0 ? 1 / totalR : 0;
 
                 return (
@@ -423,8 +444,7 @@ export default function UValueCalculator({ projectId }) {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns:
-                  "42px minmax(180px, 1.5fr) minmax(120px, 0.8fr) minmax(120px, 0.8fr) minmax(95px, 0.6fr) 132px",
+                gridTemplateColumns: gridCols,
                 gap: 8,
                 alignItems: "center",
                 color: "#2d5a8a",
@@ -444,6 +464,7 @@ export default function UValueCalculator({ projectId }) {
             </div>
 
             <div style={{ display: "flex", flexDirection: "column" }} onDragLeave={() => setDropIndex(null)}>
+              {skinRow("External surface", "EXT", totals.rse, "#38bdf8")}
               {dropZone(0)}
               {layers.map((layer, index) => {
                 const rValue = layerRValue(layer);
@@ -452,8 +473,7 @@ export default function UValueCalculator({ projectId }) {
                     <div
                       style={{
                         display: "grid",
-                        gridTemplateColumns:
-                          "42px minmax(180px, 1.5fr) minmax(120px, 0.8fr) minmax(120px, 0.8fr) minmax(95px, 0.6fr) 132px",
+                        gridTemplateColumns: gridCols,
                         gap: 8,
                         alignItems: "center",
                         background: "#070d1a",
@@ -541,6 +561,7 @@ export default function UValueCalculator({ projectId }) {
                   </div>
                 );
               })}
+              {skinRow("Internal surface", "INT", totals.rsi, "#a78bfa")}
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 10 }}>
@@ -560,7 +581,10 @@ export default function UValueCalculator({ projectId }) {
                 </div>
                 <div style={{ color: "#7dd3fc", fontSize: 24, fontWeight: 700 }}>
                   {formatNumber(totals.totalR)}
-                  <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>m2K/W</span>
+                  <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>m²K/W</span>
+                </div>
+                <div style={{ color: "#1a3050", fontSize: 8, marginTop: 6, lineHeight: 1.6 }}>
+                  Rse {formatNumber(totals.rse, 2)} + layers {formatNumber(totals.layersR)} + Rsi {formatNumber(totals.rsi, 2)}
                 </div>
               </div>
 
@@ -570,7 +594,10 @@ export default function UValueCalculator({ projectId }) {
                 </div>
                 <div style={{ color: "#34d399", fontSize: 24, fontWeight: 700 }}>
                   {totals.uValue > 0 ? formatNumber(totals.uValue) : "-"}
-                  <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>W/m2K</span>
+                  <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>W/m²K</span>
+                </div>
+                <div style={{ color: "#1a3050", fontSize: 8, marginTop: 6, lineHeight: 1.6 }}>
+                  Inc. surface resistances — BS EN ISO 6946
                 </div>
               </div>
             </div>
