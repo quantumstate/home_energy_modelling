@@ -30,6 +30,17 @@ const SURFACE_RESISTANCES = {
   floor: { rsi: 0.17, rse: 0.04 }, // downward heat flow
 };
 
+const BRIDGE_MATERIALS = [
+  { id: "softwood",   name: "Softwood timber",  lambda: 0.13  },
+  { id: "hardwood",   name: "Hardwood timber",  lambda: 0.18  },
+  { id: "osb",        name: "OSB / plywood",    lambda: 0.13  },
+  { id: "concrete",   name: "Concrete (dense)", lambda: 1.35  },
+  { id: "masonry",    name: "Masonry / brick",  lambda: 0.90  },
+  { id: "steel",      name: "Structural steel", lambda: 50    },
+  { id: "stainless",  name: "Stainless steel",  lambda: 17    },
+  { id: "aluminium",  name: "Aluminium",        lambda: 160   },
+];
+
 const fieldStyle = {
   width: "100%",
   boxSizing: "border-box",
@@ -107,6 +118,67 @@ function layerRValue(layer) {
   return thickness / 1000 / lambda;
 }
 
+// Returns the bridge fraction (0–1) for a thermalBridge config object.
+function bridgeFraction(tb) {
+  if (!tb) return 0;
+  if (tb.mode === "percentage")
+    return Math.min(1, Math.max(0, (Number(tb.percentage) || 0) / 100));
+  if (tb.mode === "stud") {
+    const spacing = Number(tb.studSpacingMm), thick = Number(tb.studThicknessMm);
+    return spacing > 0 ? Math.min(1, thick / spacing) : 0;
+  }
+  if (tb.mode === "fixings") {
+    const n = Number(tb.fixingsPerM2), d = Number(tb.fixingDiameterMm) / 1000;
+    return Math.min(1, n * Math.PI * (d / 2) ** 2);
+  }
+  return 0;
+}
+
+// BS EN ISO 6946 upper-bound parallel-path method across the full wall.
+// For N layers that carry thermal bridges, enumerate all 2^N path combinations.
+// Each path replaces the bridged layer(s) with either the bridge or base material
+// for its entire thickness, then sums the full-wall series resistance (Rse → layers → Rsi).
+// U = Σ (path_fraction × 1/R_path).
+function computeParallelPathU(layers, rsi, rse) {
+  const bridgedIdx = [];
+  for (let i = 0; i < layers.length; i++) {
+    const tb = layers[i].thermalBridge;
+    if (tb?.bridgeMaterial && bridgeFraction(tb) > 0) bridgedIdx.push(i);
+  }
+
+  if (bridgedIdx.length === 0) {
+    const totalR = rse + layers.reduce((s, l) => s + layerRValue(l), 0) + rsi;
+    return totalR > 0 ? 1 / totalR : 0;
+  }
+
+  const n = bridgedIdx.length;
+  let uValue = 0;
+  for (let mask = 0; mask < (1 << n); mask++) {
+    let frac = 1, R = rse + rsi, bi = 0;
+    for (let i = 0; i < layers.length; i++) {
+      if (bridgedIdx[bi] === i) {
+        const layer = layers[i];
+        const tb = layer.thermalBridge;
+        const f = bridgeFraction(tb);
+        const useBridge = Boolean((mask >> bi) & 1);
+        bi++;
+        if (useBridge) {
+          frac *= f;
+          const mat = BRIDGE_MATERIALS.find(m => m.id === tb.bridgeMaterial);
+          R += mat ? Number(layer.thicknessMm) / 1000 / mat.lambda : layerRValue(layer);
+        } else {
+          frac *= (1 - f);
+          R += layerRValue(layer);
+        }
+      } else {
+        R += layerRValue(layers[i]);
+      }
+    }
+    if (R > 0 && frac > 0) uValue += frac / R;
+  }
+  return uValue;
+}
+
 function formatNumber(value, digits = 3) {
   if (!Number.isFinite(value)) return "-";
   return value.toFixed(digits);
@@ -130,15 +202,22 @@ export default function UValueCalculator({ projectId }) {
   const [newElementType, setNewElementType] = useState("wall");
   const [dropIndex, setDropIndex] = useState(null);
   const [draggedPresetId, setDraggedPresetId] = useState(null);
+  const [editBridgeLayerId, setEditBridgeLayerId] = useState(null);
+  const [bridgeDraft, setBridgeDraft] = useState(null);
 
   const activeElement = elements.find((element) => element.id === activeElementId) || elements[0];
   const layers = activeElement?.layers || [];
 
   const totals = useMemo(() => {
     const { rsi, rse } = SURFACE_RESISTANCES[activeElement?.type] || SURFACE_RESISTANCES.wall;
-    const layersR = layers.reduce((sum, layer) => sum + layerRValue(layer), 0);
-    const totalR = rse + layersR + rsi;
-    return { rsi, rse, layersR, totalR, uValue: totalR > 0 ? 1 / totalR : 0 };
+    const uValue = computeParallelPathU(layers, rsi, rse);
+    const totalR = uValue > 0 ? 1 / uValue : 0;
+    const layersR = layers.reduce((s, l) => s + layerRValue(l), 0);
+    const hasBridges = layers.some(l => {
+      const tb = l.thermalBridge;
+      return tb?.bridgeMaterial && bridgeFraction(tb) > 0;
+    });
+    return { rsi, rse, layersR, totalR, uValue, hasBridges };
   }, [layers, activeElement?.type]);
 
   useEffect(() => {
@@ -268,7 +347,24 @@ export default function UValueCalculator({ projectId }) {
     />
   );
 
-  const gridCols = "42px minmax(180px, 1.5fr) minmax(120px, 0.8fr) minmax(120px, 0.8fr) minmax(95px, 0.6fr) 132px";
+  const openBridgeDialog = (layer) => {
+    setEditBridgeLayerId(layer.id);
+    setBridgeDraft(layer.thermalBridge ? { ...layer.thermalBridge } : {
+      bridgeMaterial: "softwood", mode: "percentage",
+      percentage: 10, studSpacingMm: 600, studThicknessMm: 45,
+      fixingsPerM2: 4, fixingDiameterMm: 10,
+    });
+  };
+  const saveBridge = () => {
+    updateLayer(editBridgeLayerId, "thermalBridge", bridgeDraft);
+    setEditBridgeLayerId(null);
+  };
+  const removeBridge = () => {
+    updateLayer(editBridgeLayerId, "thermalBridge", null);
+    setEditBridgeLayerId(null);
+  };
+
+  const gridCols = "42px minmax(180px, 1.5fr) minmax(120px, 0.8fr) minmax(120px, 0.8fr) minmax(95px, 0.6fr) 92px 132px";
   const skinRow = (label, side, rValue, accent) => (
     <div style={{ display:"grid", gridTemplateColumns: gridCols, gap:8, alignItems:"center",
       background:"#040810", border:"1px dashed #0d1a2e", borderRadius:6, padding:8, marginBottom:2 }}>
@@ -277,6 +373,7 @@ export default function UValueCalculator({ projectId }) {
       <div style={{ color:"#1a3050", fontSize:10 }}>—</div>
       <div style={{ color:"#1a3050", fontSize:10 }}>—</div>
       <div style={{ color:"#4a7fa5", fontSize:13, fontWeight:700 }}>{formatNumber(rValue)}</div>
+      <div />
       <div />
     </div>
   );
@@ -329,8 +426,7 @@ export default function UValueCalculator({ projectId }) {
               {elements.map((element) => {
                 const isActive = element.id === activeElement.id;
                 const { rsi, rse } = SURFACE_RESISTANCES[element.type] || SURFACE_RESISTANCES.wall;
-                const totalR = element.layers.reduce((sum, layer) => sum + layerRValue(layer), 0) + rsi + rse;
-                const uValue = totalR > 0 ? 1 / totalR : 0;
+                const uValue = computeParallelPathU(element.layers, rsi, rse);
 
                 return (
                   <button
@@ -460,6 +556,7 @@ export default function UValueCalculator({ projectId }) {
               <div>Thickness</div>
               <div>Lambda</div>
               <div>R value</div>
+              <div>Bridge</div>
               <div>Actions</div>
             </div>
 
@@ -468,6 +565,7 @@ export default function UValueCalculator({ projectId }) {
               {dropZone(0)}
               {layers.map((layer, index) => {
                 const rValue = layerRValue(layer);
+                const hasBridge = Boolean(layer.thermalBridge?.bridgeMaterial && bridgeFraction(layer.thermalBridge) > 0);
                 return (
                   <div key={layer.id}>
                     <div
@@ -528,6 +626,24 @@ export default function UValueCalculator({ projectId }) {
                         {formatNumber(rValue)}
                       </div>
 
+                      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:2 }}>
+                        {hasBridge && (
+                          <span style={{ color:"#fb923c", fontSize:9, fontWeight:700, lineHeight:1 }}>
+                            {(bridgeFraction(layer.thermalBridge) * 100).toFixed(
+                              layer.thermalBridge.mode === "fixings" ? 3 : 1
+                            )}%
+                          </span>
+                        )}
+                        <button type="button" title="Edit thermal bridge"
+                          onClick={() => openBridgeDialog(layer)}
+                          style={{ ...buttonStyle, minWidth:24, height:22, fontSize:13, padding:"0 4px", lineHeight:1,
+                            color: hasBridge ? "#fb923c" : "#2d5a8a",
+                            borderColor: hasBridge ? "#fb923c50" : "#132040",
+                            background: hasBridge ? "#1a0e00" : "#0a1628" }}>
+                          ✏
+                        </button>
+                      </div>
+
                       <div style={{ display: "flex", gap: 5 }}>
                         <button
                           type="button"
@@ -584,7 +700,9 @@ export default function UValueCalculator({ projectId }) {
                   <span style={{ color: "#2d5a8a", fontSize: 11, marginLeft: 8 }}>m²K/W</span>
                 </div>
                 <div style={{ color: "#1a3050", fontSize: 8, marginTop: 6, lineHeight: 1.6 }}>
-                  Rse {formatNumber(totals.rse, 2)} + layers {formatNumber(totals.layersR)} + Rsi {formatNumber(totals.rsi, 2)}
+                  {totals.hasBridges
+                    ? "Parallel path method — bridges span full wall"
+                    : `Rse ${formatNumber(totals.rse, 2)} + layers ${formatNumber(totals.layersR)} + Rsi ${formatNumber(totals.rsi, 2)}`}
                 </div>
               </div>
 
@@ -645,6 +763,175 @@ export default function UValueCalculator({ projectId }) {
           </aside>
         </div>
       </div>
+      {editBridgeLayerId && bridgeDraft && (() => {
+        const editLayer = layers.find(l => l.id === editBridgeLayerId);
+        const f = bridgeFraction(bridgeDraft);
+        const { rsi: dlgRsi, rse: dlgRse } = SURFACE_RESISTANCES[activeElement?.type] || SURFACE_RESISTANCES.wall;
+        // Wall U without any bridge on this layer
+        const layersNoBridge = layers.map(l => l.id === editBridgeLayerId ? { ...l, thermalBridge: null } : l);
+        const uWithout = computeParallelPathU(layersNoBridge, dlgRsi, dlgRse);
+        // Wall U with the current draft bridge on this layer
+        const layersWithDraft = layers.map(l => l.id === editBridgeLayerId ? { ...l, thermalBridge: bridgeDraft } : l);
+        const uWithDraft = bridgeDraft.bridgeMaterial && f > 0
+          ? computeParallelPathU(layersWithDraft, dlgRsi, dlgRse) : null;
+
+        const inStyle = { ...fieldStyle, fontSize: 11, padding: "5px 7px" };
+        const labelStyle = { color: "#2d5a8a", fontSize: 9, letterSpacing: "0.1em", marginBottom: 3 };
+        const modeBtn = (id, label) => (
+          <button type="button" key={id} onClick={() => setBridgeDraft(d => ({ ...d, mode: id }))}
+            style={{ flex:1, padding:"5px 0", fontFamily:"monospace", fontSize:10, cursor:"pointer",
+              background: bridgeDraft.mode === id ? "#1e4a7a" : "#0a1628",
+              border: `1px solid ${bridgeDraft.mode === id ? "#2563eb" : "#132040"}`,
+              color: bridgeDraft.mode === id ? "#7dd3fc" : "#4a7fa5",
+              borderRadius: 3 }}>
+            {label}
+          </button>
+        );
+
+        return (
+          <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.72)",
+            display:"flex", alignItems:"center", justifyContent:"center", zIndex:1000 }}
+            onClick={e => { if (e.target === e.currentTarget) setEditBridgeLayerId(null); }}>
+            <div style={{ background:"#070d1a", border:"1px solid #1e3a6b", borderRadius:8,
+              padding:22, width:440, maxWidth:"90vw", fontFamily:"monospace" }}>
+
+              <div style={{ color:"#7dd3fc", fontSize:12, fontWeight:700, letterSpacing:"0.12em",
+                marginBottom:4 }}>THERMAL BRIDGE</div>
+              <div style={{ color:"#2d5a8a", fontSize:10, marginBottom:16 }}>
+                {editLayer?.name || "Layer"}
+              </div>
+
+              {/* Bridge material */}
+              <div style={{ marginBottom:14 }}>
+                <div style={labelStyle}>BRIDGE MATERIAL</div>
+                <select value={bridgeDraft.bridgeMaterial}
+                  onChange={e => setBridgeDraft(d => ({ ...d, bridgeMaterial: e.target.value }))}
+                  style={{ ...inStyle, height:32, padding:"0 8px", textTransform:"none" }}>
+                  {BRIDGE_MATERIALS.map(m => (
+                    <option key={m.id} value={m.id}>{m.name} — λ {m.lambda} W/mK</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Mode tabs */}
+              <div style={{ marginBottom:12 }}>
+                <div style={labelStyle}>BRIDGE TYPE</div>
+                <div style={{ display:"flex", gap:4 }}>
+                  {modeBtn("percentage", "Percentage")}
+                  {modeBtn("stud", "Stud / Joist")}
+                  {modeBtn("fixings", "Fixings")}
+                </div>
+              </div>
+
+              {/* Mode inputs */}
+              {bridgeDraft.mode === "percentage" && (
+                <div style={{ marginBottom:14 }}>
+                  <div style={labelStyle}>BRIDGE PERCENTAGE (%)</div>
+                  <input type="number" min="0" max="100" step="0.1"
+                    value={bridgeDraft.percentage}
+                    onChange={e => setBridgeDraft(d => ({ ...d, percentage: e.target.value }))}
+                    style={inStyle} />
+                  <div style={{ color:"#1a3050", fontSize:8, marginTop:4 }}>
+                    Fraction of layer cross-section occupied by bridge material
+                  </div>
+                </div>
+              )}
+
+              {bridgeDraft.mode === "stud" && (
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:14 }}>
+                  <div>
+                    <div style={labelStyle}>CENTRE-TO-CENTRE (mm)</div>
+                    <input type="number" min="1" step="1"
+                      value={bridgeDraft.studSpacingMm}
+                      onChange={e => setBridgeDraft(d => ({ ...d, studSpacingMm: e.target.value }))}
+                      style={inStyle} />
+                  </div>
+                  <div>
+                    <div style={labelStyle}>STUD THICKNESS (mm)</div>
+                    <input type="number" min="1" step="1"
+                      value={bridgeDraft.studThicknessMm}
+                      onChange={e => setBridgeDraft(d => ({ ...d, studThicknessMm: e.target.value }))}
+                      style={inStyle} />
+                  </div>
+                  <div style={{ gridColumn:"1/-1", color:"#1a3050", fontSize:8, lineHeight:1.5 }}>
+                    Bridge fraction: {(Math.min(1, Number(bridgeDraft.studThicknessMm) /
+                      Math.max(1, Number(bridgeDraft.studSpacingMm))) * 100).toFixed(1)}%
+                    &nbsp;({bridgeDraft.studThicknessMm} mm stud @ {bridgeDraft.studSpacingMm} mm c/c)
+                  </div>
+                </div>
+              )}
+
+              {bridgeDraft.mode === "fixings" && (
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:14 }}>
+                  <div>
+                    <div style={labelStyle}>FIXINGS PER m²</div>
+                    <input type="number" min="0" step="0.1"
+                      value={bridgeDraft.fixingsPerM2}
+                      onChange={e => setBridgeDraft(d => ({ ...d, fixingsPerM2: e.target.value }))}
+                      style={inStyle} />
+                  </div>
+                  <div>
+                    <div style={labelStyle}>FIXING DIAMETER (mm)</div>
+                    <input type="number" min="0" step="0.1"
+                      value={bridgeDraft.fixingDiameterMm}
+                      onChange={e => setBridgeDraft(d => ({ ...d, fixingDiameterMm: e.target.value }))}
+                      style={inStyle} />
+                  </div>
+                  <div style={{ gridColumn:"1/-1", color:"#1a3050", fontSize:8, lineHeight:1.5 }}>
+                    Bridge fraction: {(Math.min(1, Number(bridgeDraft.fixingsPerM2) *
+                      Math.PI * ((Number(bridgeDraft.fixingDiameterMm) / 2000) ** 2)) * 100).toFixed(3)}%
+                  </div>
+                </div>
+              )}
+
+              {/* Preview — wall-level U impact */}
+              <div style={{ background:"#050a14", border:"1px solid #0d1a2e", borderRadius:5,
+                padding:"10px 12px", marginBottom:16, display:"grid",
+                gridTemplateColumns:"1fr 1fr 1fr", gap:8 }}>
+                <div>
+                  <div style={{ ...labelStyle, marginBottom:2 }}>WALL U (BASE)</div>
+                  <div style={{ color:"#7dd3fc", fontSize:13, fontWeight:700 }}>
+                    {formatNumber(uWithout)}
+                  </div>
+                </div>
+                <div>
+                  <div style={{ ...labelStyle, marginBottom:2 }}>BRIDGE FRACTION</div>
+                  <div style={{ color:"#fbbf24", fontSize:13, fontWeight:700 }}>
+                    {(f * 100).toFixed(3)}%
+                  </div>
+                </div>
+                <div>
+                  <div style={{ ...labelStyle, marginBottom:2 }}>WALL U (BRIDGED)</div>
+                  <div style={{ color: uWithDraft !== null ? "#fb923c" : "#1a3050", fontSize:13, fontWeight:700 }}>
+                    {uWithDraft !== null ? formatNumber(uWithDraft) : "—"}
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div style={{ display:"flex", gap:8 }}>
+                <button type="button" onClick={saveBridge}
+                  style={{ flex:1, height:34, fontFamily:"monospace", fontSize:11, cursor:"pointer",
+                    background:"#1e4a7a", border:"1px solid #2563eb", color:"#7dd3fc", borderRadius:4 }}>
+                  APPLY
+                </button>
+                {editLayer?.thermalBridge && (
+                  <button type="button" onClick={removeBridge}
+                    style={{ height:34, padding:"0 14px", fontFamily:"monospace", fontSize:11, cursor:"pointer",
+                      background:"#200a0a", border:"1px solid #7f1d1d", color:"#f87171", borderRadius:4 }}>
+                    REMOVE
+                  </button>
+                )}
+                <button type="button" onClick={() => setEditBridgeLayerId(null)}
+                  style={{ height:34, padding:"0 14px", fontFamily:"monospace", fontSize:11, cursor:"pointer",
+                    background:"#0a1628", border:"1px solid #132040", color:"#4a7fa5", borderRadius:4 }}>
+                  CANCEL
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </section>
   );
 }
