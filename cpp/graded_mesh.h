@@ -115,7 +115,12 @@ static std::vector<double> buildGradedAxis(std::vector<double> coords,
                                             bool minIsFar, bool maxIsFar,
                                             double nearCellMm, double growthRatio,
                                             double maxCellMm) {
-  const double eps = 1e-6;
+  // Merge near-coincident breakpoints. Feature edges that fall within a small
+  // fraction of the finest cell size produce degenerate sliver cells that wreck
+  // the local conditioning of the Gauss-Seidel solve (slow/asymmetric
+  // convergence, persistent hot/cold artefacts). Snapping them together is
+  // physically negligible (sub-cell) and keeps the mesh well-conditioned.
+  const double eps = std::max(1e-6, nearCellMm * 0.1);
   std::sort(coords.begin(), coords.end());
   coords.erase(std::unique(coords.begin(), coords.end(),
                            [eps](double a, double b) { return std::abs(b - a) < eps; }),

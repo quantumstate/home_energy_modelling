@@ -155,6 +155,17 @@ GroundResult solveGroundWithProgress(
     }
   }
 
+  // Steady-state pre-solve. The Kusuda profile assumes undisturbed ground
+  // everywhere; under a heated slab the real mean field is far warmer, and a
+  // pure transient spin-up would take *decades* of simulated time to warm that
+  // ground up — leaving cold artefacts (especially at slab edges). Running the
+  // implicit step with the thermal-mass term removed (huge dt) and a constant
+  // annual-mean surface temperature converges the *time-averaged* field
+  // directly, so the subsequent transient spin-up only needs to add the
+  // seasonal wave and converges in ~1 year.
+  for (int k = 0; k < 100; ++k)
+    stepBackwardEuler(mesh, binfo, capacities, epwStats.mean, 1e12);
+
   // Weekly snapshot storage.
   const int numCells = mesh.cols * mesh.rows;
   const int weeksPerYear = 52;

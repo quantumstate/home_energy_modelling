@@ -479,8 +479,48 @@ export default function GroundTab({ projectId }) {
       }
       ctx.setLineDash([]);
     }
+
+    // Temperature scale (colorbar) — only when solve results are shown
+    if (solveStatus === "done" && solveColorRange) {
+      const { tMin, tMax } = solveColorRange;
+      const barH  = Math.min(180, cssH - 60);
+      const barW  = 14;
+      const barX  = cssW - 58;
+      const barY  = 20;
+
+      // Gradient: warm (tMax) at top, cold (tMin) at bottom
+      const grad = ctx.createLinearGradient(barX, barY, barX, barY + barH);
+      for (let i = 0; i < COLOR_STOPS.length; i++) {
+        const [r, g, b] = COLOR_STOPS[i];
+        grad.addColorStop(1 - i / (COLOR_STOPS.length - 1), `rgb(${r},${g},${b})`);
+      }
+      ctx.fillStyle = grad;
+      ctx.fillRect(barX, barY, barW, barH);
+      ctx.strokeStyle = "#2d5a8a";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(barX, barY, barW, barH);
+
+      // Tick marks and labels
+      const numTicks = 5;
+      ctx.font = "10px monospace";
+      ctx.textAlign = "left";
+      for (let i = 0; i <= numTicks; i++) {
+        const frac = i / numTicks;  // 0 = bottom (tMin), 1 = top (tMax)
+        const temp = tMin + frac * (tMax - tMin);
+        const ty   = barY + barH - frac * barH;
+        ctx.strokeStyle = "#2d5a8a";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(barX + barW, ty);
+        ctx.lineTo(barX + barW + 4, ty);
+        ctx.stroke();
+        ctx.fillStyle = "#c8d8f0";
+        ctx.fillText(`${temp.toFixed(1)}°`, barX + barW + 6, ty + 3.5);
+      }
+    }
   }, [shapes, view, selectedId, draft, activeMaterialId, snapGuides, tool, selectedEdge,
-      edgeConditions, showMesh, meshResult, meshStatus, solveStatus, solveResult, measureLine, selectedWeek]);
+      edgeConditions, showMesh, meshResult, meshStatus, solveStatus, solveResult, measureLine,
+      selectedWeek, solveColorRange]);
 
   useEffect(() => { draw(); }, [draw]);
 
@@ -917,6 +957,48 @@ export default function GroundTab({ projectId }) {
             {meshStatus === "error" && "Mesh build failed"}
           </div>
         )}
+
+        {/* Export / Import */}
+        <div style={{ display: "flex", gap: 4 }}>
+          <button type="button" style={{ ...buttonStyle(false), flex: 1 }}
+            onClick={() => {
+              const data = JSON.stringify({ shapes, edgeConditions, measureLine, config }, null, 2);
+              const a = document.createElement("a");
+              a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
+              a.download = "ground_model.json";
+              a.click();
+              URL.revokeObjectURL(a.href);
+            }}>
+            Export
+          </button>
+          <label style={{ ...buttonStyle(false), flex: 1, textAlign: "center", cursor: "pointer" }}>
+            Import
+            <input type="file" accept=".json" style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                  try {
+                    const parsed = JSON.parse(ev.target.result);
+                    if (!Array.isArray(parsed.shapes)) return;
+                    const cfg = { ...DEFAULT_GROUND_CONFIG, ...(parsed.config || {}) };
+                    const existingGround = parsed.shapes.find((s) => s.isGround);
+                    const groundBox = groundBoxFromConfig(cfg, existingGround?.id);
+                    const nonGround = parsed.shapes.filter((s) => !s.isGround);
+                    setShapes([groundBox, ...nonGround]);
+                    setEdgeConditions(parsed.edgeConditions || {});
+                    setMeasureLine(parsed.measureLine || []);
+                    setConfig(cfg);
+                    setSolveResult(null);
+                    setSolveStatus("idle");
+                  } catch { /* invalid file */ }
+                };
+                reader.readAsText(file);
+                e.target.value = "";
+              }} />
+          </label>
+        </div>
 
         {/* Solve button + results */}
         <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 8 }}>

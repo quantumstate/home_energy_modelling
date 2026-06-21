@@ -166,6 +166,21 @@ inline GroundBoundaryInfo classifyGroundBoundaryNodes(
     double hi    = horizontal ? std::max(x1, x2) : std::max(y1, y2);
     double fixed = horizontal ? y1 : x1;
 
+    // Snap the edge's perpendicular coordinate to the nearest mesh node line.
+    // The mesh builder may merge near-coincident breakpoints, so an edge
+    // coordinate is not guaranteed to land exactly on a node — without this
+    // snap the exact-match loop below would silently stamp no nodes and the
+    // boundary condition would be lost.
+    {
+      const std::vector<double>& axis = horizontal ? mesh.nodeYs : mesh.nodeXs;
+      double best = fixed; double bestD = 1e18;
+      for (double a : axis) {
+        double d = std::abs(a - fixed);
+        if (d < bestD) { bestD = d; best = a; }
+      }
+      fixed = best;
+    }
+
     for (int nj = 0; nj <= mesh.rows; ++nj) {
       for (int ni = 0; ni <= mesh.cols; ++ni) {
         double nodeX = mesh.nodeXs[ni];
