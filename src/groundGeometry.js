@@ -88,6 +88,9 @@ export function getExposedSegments(shapes, shapeId, side) {
 
   for (const other of shapes) {
     if (other.id === shapeId) continue;
+    // Building shapes cut INTO the ground — the ground box must not subtract their edges.
+    // (Only same-priority shapes occlude each other.)
+    if (!shape.isGround && other.isGround) continue;
     for (const oside of SIDES) {
       const oHorizontal = oside === "top" || oside === "bottom";
       if (horizontal !== oHorizontal) continue;
@@ -98,6 +101,23 @@ export function getExposedSegments(shapes, shapeId, side) {
       } else {
         if (Math.abs(seg.a.x - oseg.a.x) < EDGE_EPS)
           intervals = subtractInterval(intervals, oseg.a.y, oseg.b.y);
+      }
+    }
+  }
+
+  // For the ground box: also clip where a building shape straddles this edge
+  // (overlaps without being coincident — e.g. a foundation crossing the ground surface).
+  if (shape.isGround) {
+    for (const other of shapes) {
+      if (other.isGround) continue;
+      if (horizontal) {
+        const edgeY = seg.a.y;
+        if (other.y < edgeY - EDGE_EPS && other.y + other.h > edgeY + EDGE_EPS)
+          intervals = subtractInterval(intervals, other.x, other.x + other.w);
+      } else {
+        const edgeX = seg.a.x;
+        if (other.x < edgeX - EDGE_EPS && other.x + other.w > edgeX + EDGE_EPS)
+          intervals = subtractInterval(intervals, other.y, other.y + other.h);
       }
     }
   }

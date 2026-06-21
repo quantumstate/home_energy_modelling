@@ -333,10 +333,16 @@ export default function GroundTab({ projectId }) {
       const sw = shape.w * scale;
       const sh = shape.h * scale;
 
-      // Ground box: dashed hatching for the "infinite" feel
+      // Ground box: fill with holes punched where building shapes overlap.
       if (shape.isGround) {
+        ctx.beginPath();
+        ctx.rect(sx, sy, sw, sh);
+        for (const other of shapes) {
+          if (other.isGround) continue;
+          ctx.rect(offsetX + other.x * scale, offsetY + other.y * scale, other.w * scale, other.h * scale);
+        }
         ctx.fillStyle = material.color + "22";
-        ctx.fillRect(sx, sy, sw, sh);
+        ctx.fill("evenodd");
         ctx.strokeStyle = material.color + "88";
         ctx.lineWidth = 1;
         ctx.setLineDash([6, 6]);

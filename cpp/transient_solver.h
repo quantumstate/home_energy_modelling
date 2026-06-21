@@ -185,6 +185,20 @@ inline GroundBoundaryInfo classifyGroundBoundaryNodes(
         bool hasMaterial = cl(ni-1,nj-1)>0 || cl(ni,nj-1)>0 || cl(ni-1,nj)>0 || cl(ni,nj)>0;
         if (!hasMaterial) continue;
 
+        // Don't let a lower-priority layer's condition override the area
+        // belonging to a higher-priority layer (e.g. the ground-box "surface"
+        // edge must not stamp nodes that sit inside the concrete slab).
+        bool coveredByHigher = false;
+        for (const auto& other : layers) {
+          if (other.priority <= layer.priority) continue;
+          if (nodeX >= other.x - eps && nodeX <= other.x + other.w + eps &&
+              nodeY >= other.y - eps && nodeY <= other.y + other.h + eps) {
+            coveredByHigher = true;
+            break;
+          }
+        }
+        if (coveredByHigher) continue;
+
         int idx = nj * nodeCols + ni;
         if (cond.type == "inside") {
           info.isInside[idx]   = true;
@@ -266,9 +280,12 @@ inline StepResult stepBackwardEuler(GroundMesh& mesh,
   const int numNodes = (mesh.cols + 1) * (mesh.rows + 1);
 
   // Apply Dirichlet boundary temperatures before the sweep.
+  // Surface is applied first; inside overwrites it so "inside" always wins
+  // when both flags are set on the same node (e.g. slab floor collinear with
+  // the ground-box top edge that carries a surface condition).
   for (int idx = 0; idx < numNodes; ++idx) {
-    if (info.isInside[idx])  mesh.temperatures[idx] = info.insideTemp[idx];
     if (info.isSurface[idx]) mesh.temperatures[idx] = surfaceTemp;
+    if (info.isInside[idx])  mesh.temperatures[idx] = info.insideTemp[idx];
   }
 
   // Gauss-Seidel sweeps.
@@ -308,8 +325,8 @@ inline StepResult stepBackwardEuler(GroundMesh& mesh,
 
   // Re-clamp boundary nodes after the sweep (GS may have drifted them).
   for (int idx = 0; idx < numNodes; ++idx) {
-    if (info.isInside[idx])  mesh.temperatures[idx] = info.insideTemp[idx];
     if (info.isSurface[idx]) mesh.temperatures[idx] = surfaceTemp;
+    if (info.isInside[idx])  mesh.temperatures[idx] = info.insideTemp[idx];
   }
 
   return res;
