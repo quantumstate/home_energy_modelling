@@ -11,7 +11,9 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "build:wasm": "bash cpp/build.sh",
-    "build:wasm:win": "cpp\\build.bat"
+    "build:wasm:win": "cpp\\build.bat",
+    "build:wasm:ground": "bash cpp/build_ground.sh",
+    "build:wasm:ground:win": "cpp\\build_ground.bat"
   },
   "dependencies": {
     "react": "^19.2.6",
