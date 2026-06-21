@@ -21,29 +21,28 @@ const EDGE_HIT_TOLERANCE_PX = 6;
 
 const createId = () => `shape-${crypto.randomUUID()}`;
 
-// Default ground box dimensions (shown in the initial view).
-const GROUND_BOX_W_MM = 10000;   // 10 m wide
-const GROUND_BOX_H_MM = 15000;   // 15 m deep (updated to match domainDepthM)
-
-function makeDefaultGroundBox() {
+function groundBoxFromConfig(config, existingId) {
+  const w = config.domainHalfWidthM * 2 * 1000;
+  const h = config.domainDepthM * 1000;
   return {
-    id: createId(),
-    x: -GROUND_BOX_W_MM / 2,
+    id: existingId ?? createId(),
+    x: -w / 2,
     y: 0,
-    w: GROUND_BOX_W_MM,
-    h: GROUND_BOX_H_MM,
+    w,
+    h,
     materialId: "ground",
     isGround: true,
   };
 }
 
 function readInitialState(storageKey) {
-  const defaultView = { offsetX: 350, offsetY: 50, scale: PX_PER_MM_DEFAULT };
-  const defaultState = () => ({
-    shapes: [makeDefaultGroundBox()],
+  const defaultConfig = { ...DEFAULT_GROUND_CONFIG };
+  const defaultView   = { offsetX: 350, offsetY: 50, scale: PX_PER_MM_DEFAULT };
+  const defaultState  = () => ({
+    shapes: [groundBoxFromConfig(defaultConfig)],
     edgeConditions: {},
     measureLine: [],
-    config: { ...DEFAULT_GROUND_CONFIG },
+    config: defaultConfig,
     view: defaultView,
   });
 
@@ -52,11 +51,16 @@ function readInitialState(storageKey) {
     if (!raw) throw new Error();
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.shapes)) throw new Error();
+    const config = { ...DEFAULT_GROUND_CONFIG, ...(parsed.config || {}) };
+    // Always re-derive the ground box from config so its size stays in sync.
+    const existingGround = parsed.shapes.find((s) => s.isGround);
+    const groundBox = groundBoxFromConfig(config, existingGround?.id);
+    const nonGround = parsed.shapes.filter((s) => !s.isGround);
     return {
-      shapes:         parsed.shapes,
+      shapes:         [groundBox, ...nonGround],
       edgeConditions: parsed.edgeConditions || {},
       measureLine:    parsed.measureLine || [],
-      config:         { ...DEFAULT_GROUND_CONFIG, ...(parsed.config || {}) },
+      config,
       view:           parsed.view || defaultView,
     };
   } catch {
@@ -161,6 +165,17 @@ export default function GroundTab({ projectId }) {
       localStorage.setItem(storageKey, JSON.stringify({ shapes, edgeConditions, measureLine, config, view }));
     } catch { /* best effort */ }
   }, [shapes, edgeConditions, measureLine, config, view, storageKey]);
+
+  // ── Keep ground box in sync with domain config ────────────────────────────
+  useEffect(() => {
+    setShapes((prev) => {
+      const ground = prev.find((s) => s.isGround);
+      if (!ground) return prev;
+      const updated = groundBoxFromConfig(config, ground.id);
+      if (updated.x === ground.x && updated.w === ground.w && updated.h === ground.h) return prev;
+      return prev.map((s) => (s.isGround ? updated : s));
+    });
+  }, [config.domainHalfWidthM, config.domainDepthM]);
 
   // ── Mesh preview ──────────────────────────────────────────────────────────
   useEffect(() => {
